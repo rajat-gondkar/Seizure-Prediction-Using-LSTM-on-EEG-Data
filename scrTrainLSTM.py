@@ -8,9 +8,12 @@
 import sys, os
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
+
 import libDataIO as dio
 import libModelLSTM as LSTM
 import libUtils as utils
+import libCHBMITDataset as chb
 
 from operator import itemgetter
 
@@ -131,6 +134,7 @@ if (blnBatchMode):
     objArgParse.add_argument('-bs',   '--batchsize',          required = True,                  help = '')
 
     objArgParse.add_argument('-gpu',  '--gpudevice',          required = False, default = -1,   help = '')
+    objArgParse.add_argument('-nw',   '--numworkers',         required = False, default = 4,    help = '')
 
     objArgParse.add_argument('-hd',   '--hiddendim',          required = True,                  help = '')
     objArgParse.add_argument('-nl',   '--numlayers',          required = True,                  help = '')
@@ -176,6 +180,7 @@ if (blnBatchMode):
     argBatchSize         = int(dctArgs['batchsize'])
 
     argGPUDevice         = int(dctArgs['gpudevice'])
+    argNumWorkers        = int(dctArgs['numworkers'])
 
     #intFeaturesDim      = intTrainNumChannels           # TODO: Find a way to specify which channels to use
     argHiddenDim         = int(dctArgs['hiddendim'])
@@ -205,14 +210,14 @@ else:
     #                        been parsed from the command line and will apply
     #                        the following values instead
     
-    argCSVPath           = './DataCSVs/CHB-MIT/chb20.csv'
+    argCSVPath           = './DataCSVs/CHB-MIT/chb01.csv'
     
     #argTestCSVPath       = ''
-    argTestCSVPath       = './DataCSVs/CHB-MIT/chb20_Test.csv'
+    argTestCSVPath       = './DataCSVs/CHB-MIT/chb01_Test.csv'
     
-    #argResamplingFreq   = 500    # Sampling rate in Hz (default = -1, use raw data's sampling rate)
-    argResamplingFreq    = -1     # Sampling rate in Hz (default = -1, use raw data's sampling rate)
-    argSubSeqDuration    = 1      # Duration of each subsequence in seconds (default = -1, use raw data's segment length)
+    # --- Cloud-optimized defaults (16 GB RAM, 6 GB VRAM) ---
+    argResamplingFreq    = 128    # Downsample to 128 Hz (cuts memory ~50%, minimal info loss for seizure detection)
+    argSubSeqDuration    = 5      # 5-second windows (fewer samples, more temporal context for LSTM)
     argStepSizeTimePts   = -1     # Step size of sliding window in time points (default = -1, no sliding window)
     argStepSizeStates    = {}     # Step size of sliding window for specific segment states (default = {}, use -ssv value)
     argSubWindowFraction = 0.3    # Fraction of sliding window to use to determine segment type (default = -1, entire window)
@@ -227,9 +232,10 @@ else:
     argTestSetFrac       = 0.1    # Fraction of training set to reserve for testing
     argShuffleIndices    = True   # Randomly shuffle training set sequence indices prior to training
     argShuffleData       = True   # Randomly shuffle data batches prior to training
-    argBatchSize         = 32     # Number of subsequences in a batch
+    argBatchSize         = 16     # Batch size tuned for ~6 GB VRAM (RTX 4050)
 
     argGPUDevice         = 0      # Which GPU device to use for training
+    argNumWorkers        = 4      # Parallel data-loading workers
 
     #intFeaturesDim      = intTrainNumChannels  # TODO: Find a way to specify which channels to use
     argHiddenDim         = 256    # Number of dimensions of the LSTM hidden layers
@@ -275,6 +281,7 @@ print('argShuffleData = {}'.format(argShuffleData))
 print('argBatchSize = {}'.format(argBatchSize))
 
 print('argGPUDevice = {}'.format(argGPUDevice))
+print('argNumWorkers = {}'.format(argNumWorkers))
 
 #print('argFeaturesDim = {}'.format(argFeaturesDim))
 print('argHiddenDim = {}'.format(argHiddenDim))
@@ -386,363 +393,142 @@ print()
 #           the prediction result is lower than if we train with segments from
 #           the same time period
 
-# Read CHB-MIT training data from files using sliding window
-lstTrainingFilenames, lstTrainingSegLabels, lstTrainingSegTypes, arrTrainingDataRaw, lstTrainingSegDurations, lstTrainingSamplingFreqs, lstTrainingChannels, lstTrainingSequences, lstTrainingSubSequences, lstTrainingSeizureDurations, arrTrainingStartEndTimesSec, tupScalingInfo = dio.fnReadCHBMITEDFFiles_SlidingWindow(
-    argCSVPath = argCSVPath, argTestCSVPath = argTestCSVPath, argResamplingFreq = argResamplingFreq, argSubSeqDuration = argSubSeqDuration, argScalingParams = argScalingParams, argStepSizeTimePts = argStepSizeTimePts, argStepSizeStates = argStepSizeStates, argSubWindowFraction = argSubWindowFraction, argAnnoSuffix = 'annotation.txt', argDebug = True, argTestMode = False)
+# Build lazy-loading Dataset (scans files once for metadata, reads windows on-the-fly)
+objFullDataset = chb.CHBMITDataset(
+    csv_path=argCSVPath,
+    resampling_freq=argResamplingFreq,
+    subseq_duration=argSubSeqDuration,
+    scaling_params=argScalingParams,
+    scaling_info=(),
+    step_size_time_pts=argStepSizeTimePts,
+    step_size_states=argStepSizeStates,
+    sub_window_fraction=argSubWindowFraction,
+    anno_suffix='annotation.txt',
+    argInfo=True, argDebug=False)
 
+intTotalWindows = len(objFullDataset)
+print('Total windows in dataset: {}'.format(intTotalWindows))
+objFullDataset.count_by_class()
 print()
 
 utils.fnShowMemUsage()
 print()
 
+# Keep references needed later for model saving
+lstTrainingChannels = objFullDataset.channels
+intTrainNumChannels = objFullDataset.num_channels
+intTrainSeqLen      = objFullDataset.subseq_timepts_resampled
+tupScalingInfo      = ()  # computed internally by Dataset
 
-# In[ ]:
-
-
-# TEST: Take a quick snapshot of the data set
-intStartIdx = 0
-intEndIdx = 10
-#intEndIdx = len(lstTrainingSegLabels)
-
-print('Displaying a snapshot of the data set (from subsequence {} to {}):\n'.format(intStartIdx, intEndIdx))
-
-for tupZip in zip(list(range(len(lstTrainingSegLabels[intStartIdx:intEndIdx]))),
-                  lstTrainingSegLabels[intStartIdx:intEndIdx],
-                  lstTrainingSegTypes[intStartIdx:intEndIdx],
-                  lstTrainingSegDurations[intStartIdx:intEndIdx],
-                  lstTrainingSamplingFreqs[intStartIdx:intEndIdx],
-                  lstTrainingSequences[intStartIdx:intEndIdx],
-                  lstTrainingSubSequences[intStartIdx:intEndIdx]):
-    print(*tupZip, sep = '\t')
-    
-print()
-
-
-# In[ ]:
-
-
-# Perform non-random oversampling of the ictal data due to imbalanced
-# classification between the amount of interictal data versus ictal data
-
-blnDebug = False
-
-# Get the subsequences that are labeled as ictal state
-lstSeizureSeqIdx = [intSeqIdx for intSeqIdx, intSegType in enumerate(lstTrainingSegTypes) if intSegType == 2]
-
-# Collect all related data for these ictal subsequences
-lstSeizureFilenames     = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingFilenames))
-lstSeizureSeqLabels     = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingSegLabels))
-lstSeizureSegTypes      = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingSegTypes))
-arrSeizureDataRaw       = arrTrainingDataRaw[:, :, lstSeizureSeqIdx]
-lstSeizureSegDurations  = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingSegDurations))
-lstSeizureSamplingFreqs = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingSamplingFreqs))
-lstSeizureChannels      = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingChannels))
-lstSeizureSequences     = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingSequences))
-lstSeizureSubSequences  = list(itemgetter(*lstSeizureSeqIdx)(lstTrainingSubSequences))
-
-print('arrSeizureDataRaw.shape = {}'.format(arrSeizureDataRaw.shape))
-print()
-
-if (blnDebug):
-    # Print info on the collected ictal subsequences
-    for tupSubSeq in zip(lstSeizureFilenames, lstSeizureSeqLabels, lstSeizureSegTypes, lstSeizureSegDurations, lstSeizureSamplingFreqs, lstSeizureSequences, lstSeizureSubSequences):
-        print('{}, {}, {}, {}, {}, {}, {}'.format(*tupSubSeq))
-
-    print()
-
-# Calculate the ratio between the number of ictal and non-ictal subsequences,
-# and multiply the number of ictal subsequences with this imbalance factor to
-# increase the presence of ictal subsequences in the data set
-intTotalSubSeqs = arrTrainingDataRaw.shape[2]
-intNumSeizureSubSeqs = arrSeizureDataRaw.shape[2]
-
-intImbalFactor = int(round((intTotalSubSeqs - intNumSeizureSubSeqs) / intNumSeizureSubSeqs))
-print('intTotalSubSeqs = {}, intNumSeizureSubSeqs = {}: intImbalFactor = {}'.format(intTotalSubSeqs, intNumSeizureSubSeqs, intImbalFactor))
-print()
-
-# Perform oversampling of ictal data only if intImbalFactor > 0
-if (intImbalFactor > 0):
-    print('Oversampling of ictal data performed using intImbalFactor = {}'.format(intImbalFactor))
-    print()
-    
-    # Multiply the number of ictal subsequences by intImbalFactor
-    lstSeizureFilenamesRep     = lstSeizureFilenames * intImbalFactor
-    lstSeizureSeqLabelsRep     = lstSeizureSeqLabels * intImbalFactor
-    lstSeizureSegTypesRep      = lstSeizureSegTypes * intImbalFactor
-    arrSeizureDataRawRep       = np.tile(arrSeizureDataRaw, (1, 1, intImbalFactor))
-    lstSeizureSegDurationsRep  = lstSeizureSegDurations * intImbalFactor
-    lstSeizureSamplingFreqsRep = lstSeizureSamplingFreqs * intImbalFactor
-    lstSeizureChannelsRep      = lstSeizureChannels * intImbalFactor
-    lstSeizureSequencesRep     = lstSeizureSequences * intImbalFactor
-    lstSeizureSubSequencesRep  = lstSeizureSubSequences * intImbalFactor
-
-    print('arrSeizureDataRawRep.shape = {}'.format(arrSeizureDataRawRep.shape))
-
-    #for tupSubSeqRep in zip(lstSeizureFilenamesRep, lstSeizureSeqLabelsRep, lstSeizureSegTypesRep, lstSeizureSegDurationsRep, lstSeizureSamplingFreqsRep, lstSeizureSequencesRep, lstSeizureSubSequencesRep):
-    #    print('{}, {}, {}, {}, {}, {}, {}'.format(*tupSubSeqRep))
-
-    #print()
-
-    # Append the replicated ictal data to the end of the data set
-    lstTrainingFilenamesAug     = lstTrainingFilenames + lstSeizureFilenamesRep
-    lstTrainingSegLabelsAug     = lstTrainingSegLabels + lstSeizureSeqLabelsRep
-    lstTrainingSegTypesAug      = lstTrainingSegTypes + lstSeizureSegTypesRep
-    arrTrainingDataRawAug       = np.concatenate((arrTrainingDataRaw, arrSeizureDataRawRep), axis = 2)
-    lstTrainingSegDurationsAug  = lstTrainingSegDurations + lstSeizureSegDurationsRep
-    lstTrainingSamplingFreqsAug = lstTrainingSamplingFreqs + lstSeizureSamplingFreqsRep
-    lstTrainingChannelsAug      = lstTrainingChannels + lstSeizureChannelsRep
-    lstTrainingSequencesAug     = lstTrainingSequences + lstSeizureSequencesRep
-    lstTrainingSubSequencesAug  = lstTrainingSubSequences + lstSeizureSubSequencesRep
-
-    print('arrTrainingDataRawAug.shape = {}'.format(arrTrainingDataRawAug.shape))
-
-    # Append the replicated ictal data to the end of the data set
-    lstTrainingFilenames     = lstTrainingFilenamesAug
-    lstTrainingSegLabels     = lstTrainingSegLabelsAug
-    lstTrainingSegTypes      = lstTrainingSegTypesAug
-    arrTrainingDataRaw       = arrTrainingDataRawAug
-    lstTrainingSegDurations  = lstTrainingSegDurationsAug
-    lstTrainingSamplingFreqs = lstTrainingSamplingFreqsAug
-    lstTrainingChannels      = lstTrainingChannelsAug
-    lstTrainingSequences     = lstTrainingSequencesAug
-    lstTrainingSubSequences  = lstTrainingSubSequencesAug
-
-    print()
-
-    print('Size of arrSeizureDataRawRep = {:.2f}Gb'.format(utils.fnByte2GB(arrSeizureDataRawRep.nbytes)))
-    print('Size of arrTrainingDataRaw   = {:.2f}Gb'.format(utils.fnByte2GB(arrTrainingDataRaw.nbytes)))
-    print()
-    
-else:
-    print('Oversampling of ictal data not performed since intImbalFactor = {}'.format(intImbalFactor))
-    print()
-    
-    print('Size of arrSeizureDataRaw = {:.2f}Gb'.format(utils.fnByte2GB(arrSeizureDataRaw.nbytes)))
-    print('Size of arrTrainingDataRaw   = {:.2f}Gb'.format(utils.fnByte2GB(arrTrainingDataRaw.nbytes)))
-    print()
-    
-utils.fnShowMemUsage()
-print()
-
-
-# In[ ]:
-
-
-# Total available CPU memory = 32GB
-# Total available GPU memory = 11GB
-
-# (1) Use stepsize = 100 and train
-# (2) Try larger window sizes and compare memory usage
-# (3) Debug by inspecting whether window is slicing correctly
-# (4) Use false positives and false negatives to determine
-#     which raw data file to inspect (if prediction accuracy
-#     is high, even if labeling is incorrect, doesn't matter)
-
-# Looks like we're CPU memory-limited instead of GPU resource limited
-# stepsize = 100, 4.81GB -> 9.66GB (OK) -> theoretical = 18GB, actual = 14GB used (GPU usage = 844MB, 41%)
-# stepsize = 80, 6.00GB -> 12.06GB (OK) -> theoretical = 24GB, actual = 18GB used (GPU usage = 970MB, 48%)
-# stepsize = 60, 8.05GB -> 16.14GB (OK) -> theoretical = 32GB, actual = 24GB used (out of memory in training/val set cell)
-# stepsize = 55, 8.78GB -> 17.60GB (OK) -> theoretical = 34GB, actual = 26GB used (out of memory in training/val set cell)
-# stepsize = 50, 9.65GB -> ~20GB (not OK) -> theoretical = 40GB
-
-
-# In[ ]:
-
-
-# Input width = 15 (number of channels/features)
-# Sequence length = 600 * 5000 = 3000000 (number of time points)
-# Batch size = 1 (for each segment)
-
-# Reshape arrTrainingDataRaw[] from [feature/channel size x segment length x batch/segment size]
-# to batch_first [batch/segment size x segment length x feature/channel size]
-intTrainNumChannels, intTrainSeqLen, intTrainNumSegments = arrTrainingDataRaw.shape
-print('intTrainNumChannels, intTrainSeqLen, intTrainNumSegments = ({}, {}, {})'.format(intTrainNumChannels, intTrainSeqLen, intTrainNumSegments))
-arrTrainingDataBatchFirst = arrTrainingDataRaw.T.reshape(intTrainNumSegments, intTrainSeqLen, intTrainNumChannels)
-print('arrTrainingDataBatchFirst.shape = {}'.format(arrTrainingDataBatchFirst.shape))
-
-# Convert the segment types into an np.array
-arrTrainingSegTypes = np.array(lstTrainingSegTypes, dtype = int)
-print('arrTrainingSegTypes = {}'.format(arrTrainingSegTypes))
-
-print()
-
-
-# In[ ]:
-
-
-# Split the original training set into training, validation, and test sets
-fltValSetFrac = argValSetFrac    # Fraction of segments reserved for validation
-fltTestSetFrac = argTestSetFrac  # Fraction of segments reserved for testing (useful for Kaggle prediction data set)
+# ---------------------------------------------------------------------------
+# Train / validation / test split
+# ---------------------------------------------------------------------------
+fltValSetFrac = argValSetFrac
+fltTestSetFrac = argTestSetFrac
 fltTrainSetFrac = 1 - fltValSetFrac - fltTestSetFrac
 
-blnShuffleIndices = argShuffleIndices
+lstAllIndices = np.arange(intTotalWindows)
+if argShuffleIndices:
+    np.random.seed(1)
+    np.random.shuffle(lstAllIndices)
 
-print('fltValSetFrac = {}, fltTestSetFrac = {}, fltTrainSetFrac = {:.2f}'.format(fltValSetFrac, fltTestSetFrac, fltTrainSetFrac))
-print('blnShuffleIndices = {}'.format(blnShuffleIndices))
+intTrainEnd = round(intTotalWindows * fltTrainSetFrac)
+intValEnd   = intTrainEnd + round(intTotalWindows * fltValSetFrac)
+
+lstTrainIndices = lstAllIndices[:intTrainEnd].tolist()
+lstValIndices   = lstAllIndices[intTrainEnd:intValEnd].tolist()
+lstTestIndices  = lstAllIndices[intValEnd:].tolist()
+
+print('Training set:   {} samples'.format(len(lstTrainIndices)))
+print('Validation set: {} samples'.format(len(lstValIndices)))
+print('Test set:       {} samples'.format(len(lstTestIndices)))
 print()
 
-# NOTE: We do not randomly shuffle the segment indices like in CNN trainings because
-#       data fed into RNNs are time-dependent, so we don't want the training and
-#       validation sets to be arranged out of sequence. However, we should still try
-#       a version where the model is trained by feeding the RNN with randomly arranged
-#       sequences to see if this indeed makes a difference
-lstTrainSegIndices = np.array(list(range(intTrainNumSegments)))  # Create a numpy array that goes from [0:intNumSegments]
+objTrainDataset = Subset(objFullDataset, lstTrainIndices)
+objValDataset   = Subset(objFullDataset, lstValIndices)
+objTestDataset  = Subset(objFullDataset, lstTestIndices)
 
-# Include the following code if we want to see what happens if we randomize the
-# training and validation sequences
-if (blnShuffleIndices):
-    np.random.seed(1)                      # Set random seed for reproducibility
-    np.random.shuffle(lstTrainSegIndices)  # Randomly shuffle the indices
+# ---------------------------------------------------------------------------
+# Class-balancing via WeightedRandomSampler (no physical data duplication)
+# ---------------------------------------------------------------------------
+train_labels = [objFullDataset.index[i]['label'] for i in lstTrainIndices]
+class_counts = np.bincount(train_labels)
+class_weights = np.zeros_like(class_counts, dtype=np.float64)
+nonzero = class_counts > 0
+class_weights[nonzero] = 1.0 / class_counts[nonzero]
+sample_weights = [class_weights[lbl] for lbl in train_labels]
 
-# The number of training indices is based on fltTrainSetFrac of the entire data set
-intTrainStartIdx = 0
-intTrainEndIdx   = round(intTrainNumSegments * fltTrainSetFrac)
-print('Training set [start:end] = [{}:{}]'.format(intTrainStartIdx, intTrainEndIdx))
-lstTrainIndices = lstTrainSegIndices[intTrainStartIdx:intTrainEndIdx]  # Get the list of training indices
-print('lstTrainIndices = {}'.format(lstTrainIndices))
+objTrainSampler = WeightedRandomSampler(
+    weights=sample_weights,
+    num_samples=len(lstTrainIndices),
+    replacement=True)
 
-# The following fraction of the data set contributes to the validation set
-intValStartIdx = intTrainEndIdx
-intValEndIdx   = intTrainEndIdx + round(intTrainNumSegments * fltValSetFrac)
-print('Validation set [start:end] = [{}:{}]'.format(intValStartIdx, intValEndIdx))
-lstValIndices = lstTrainSegIndices[intValStartIdx:intValEndIdx]  # Get the list of validation indices
-print('lstValIndices = {}'.format(lstValIndices))
-
-# Extract the training and validation data from arrAllDataBatchFirst[]
-arrTrainingData = arrTrainingDataBatchFirst[lstTrainIndices, :, :]
-arrValData      = arrTrainingDataBatchFirst[lstValIndices, :, :]
-print('arrTrainingData.shape = {}, arrValData.shape = {}'.format(arrTrainingData.shape, arrValData.shape))
-
-# Split the segment types into training and validation labels as well
-arrTrainingLabels = arrTrainingSegTypes[lstTrainIndices]
-arrValLabels      = arrTrainingSegTypes[lstValIndices]
-print('arrTrainingLabels.shape = {}, arrValLabels.shape = {}'.format(arrTrainingLabels.shape, arrValLabels.shape))
-
-# Also create a test set if fltTestSetFrac > 0
-if (fltTestSetFrac > 0):
-    intTestStartIdx = intValEndIdx
-    intTestEndIdx = intTrainNumSegments
-    print()
-    print('Test set [start:end] = [{}:{}]'.format(intTestStartIdx, intTestEndIdx))
-    lstTestIndices = lstTrainSegIndices[intTestStartIdx:intTestEndIdx]
-    print('lstTestIndices = {}'.format(lstTestIndices))
-
-    arrTestDataFromTraining = arrTrainingDataBatchFirst[lstTestIndices, :, :]
-    print('arrTestDataFromTraining.shape = {}'.format(arrTestDataFromTraining.shape))
-
-    arrTestLabelsFromTraining = arrTrainingSegTypes[lstTestIndices]
-    print('arrTestLabelsFromTraining.shape = {}'.format(arrTestLabelsFromTraining.shape))
-
+print('Class counts in training set: {}'.format(class_counts))
+print('Using WeightedRandomSampler for class balancing (no RAM duplication)')
 print()
 
+# ---------------------------------------------------------------------------
+# GPU check (must happen before DataLoader pin_memory)
+# ---------------------------------------------------------------------------
+blnTrainOnGPU = torch.cuda.is_available()
+if blnTrainOnGPU:
+    torch.cuda.set_device(argGPUDevice)
 
-# In[ ]:
+# ---------------------------------------------------------------------------
+# DataLoaders
+# ---------------------------------------------------------------------------
+intBatchSize = argBatchSize
 
+objTrainLoader = DataLoader(objTrainDataset, batch_size=intBatchSize,
+                            sampler=objTrainSampler, num_workers=argNumWorkers,
+                            pin_memory=blnTrainOnGPU)
+objValLoader   = DataLoader(objValDataset, batch_size=intBatchSize,
+                            shuffle=False, num_workers=argNumWorkers,
+                            pin_memory=blnTrainOnGPU)
+objTestLoader  = DataLoader(objTestDataset, batch_size=intBatchSize,
+                            shuffle=False, num_workers=argNumWorkers,
+                            pin_memory=blnTrainOnGPU)
 
-# TEST: Visualize data after the split to confirm integrity
-intStartIdx = 0
-intEndIdx = 10
-#intEndIdx = len(lstTrainingSegLabels)
-
-print('Displaying a snapshot of the split data set (from subsequence {} to {}):\n'.format(intStartIdx, intEndIdx))
-
-print('arrTrainingLabels[{}:{}] =\n{}'.format(intStartIdx, intEndIdx, arrTrainingLabels[intStartIdx:intEndIdx]))
-print('arrValLabels[{}:{}] =\n{}'.format(intStartIdx, intEndIdx, arrValLabels[intStartIdx:intEndIdx]))
-print('arrTestLabelsFromTraining[{}:{}] =\n{}'.format(intStartIdx, intEndIdx, arrTestLabelsFromTraining[intStartIdx:intEndIdx]))
+print('DataLoaders created:')
+print('  Train: {} batches/epoch (batch_size={})'.format(len(objTrainLoader), intBatchSize))
+print('  Val:   {} batches/epoch'.format(len(objValLoader)))
+print('  Test:  {} batches'.format(len(objTestLoader)))
 print()
 
-print('Training set:')
-for tupZip in zip(lstTrainIndices[intStartIdx:intEndIdx],
-                  itemgetter(*lstTrainIndices[intStartIdx:intEndIdx])(lstTrainingSegLabels),
-                  arrTrainingLabels[intStartIdx:intEndIdx],
-                  itemgetter(*lstTrainIndices[intStartIdx:intEndIdx])(lstTrainingSequences),
-                  itemgetter(*lstTrainIndices[intStartIdx:intEndIdx])(lstTrainingSubSequences)):
-    print(*tupZip, sep = '\t')
+utils.fnShowMemUsage()
 print()
 
-print('Validation set:')
-for tupZip in zip(lstValIndices[intStartIdx:intEndIdx],
-                  itemgetter(*lstValIndices[intStartIdx:intEndIdx])(lstTrainingSegLabels),
-                  arrValLabels[intStartIdx:intEndIdx],
-                  itemgetter(*lstValIndices[intStartIdx:intEndIdx])(lstTrainingSequences), 
-                  itemgetter(*lstValIndices[intStartIdx:intEndIdx])(lstTrainingSubSequences)):
-    print(*tupZip, sep = '\t')
-print()
-
-print('Test set from training data:')
-for tupZip in zip(lstTestIndices[intStartIdx:intEndIdx],
-                  itemgetter(*lstTestIndices[intStartIdx:intEndIdx])(lstTrainingSegLabels),
-                  arrTestLabelsFromTraining[intStartIdx:intEndIdx],
-                  itemgetter(*lstTestIndices[intStartIdx:intEndIdx])(lstTrainingSequences), 
-                  itemgetter(*lstTestIndices[intStartIdx:intEndIdx])(lstTrainingSubSequences)):
-    print(*tupZip, sep = '\t')
+utils.fnShowMemUsage()
 print()
 
 
 # In[ ]:
 
 
-# Convert training and test data/labels into DataLoader objects so we can easily iterate through
-# the data sets during training and testing
-
-from torch.utils.data import TensorDataset, DataLoader
-
-blnShuffleData = argShuffleData  # Shuffle data in DataLoader or not
-intBatchSize   = argBatchSize    # Set batch size for training
-
-print('blnShuffleData = {}'.format(blnShuffleData))
-print('intBatchSize = {}'.format(intBatchSize))
-print()
-
-# Convert training, validation, and test data and labels from np.arrays into data set wrapping tensors
-# for DataLoader
-objTrainDataset = TensorDataset(torch.from_numpy(arrTrainingData), torch.from_numpy(arrTrainingLabels))
-objValDataset   = TensorDataset(torch.from_numpy(arrValData), torch.from_numpy(arrValLabels))
-
-if (fltTestSetFrac > 0):
-    objTestDataset  = TensorDataset(torch.from_numpy(arrTestDataFromTraining), torch.from_numpy(arrTestLabelsFromTraining))
-    
-# Since this is an RNN we may not want to shuffle our data and lose some of the time-related history
-objTrainLoader = DataLoader(objTrainDataset, shuffle = blnShuffleData, batch_size = intBatchSize)
-objValLoader   = DataLoader(objValDataset, shuffle = blnShuffleData, batch_size = intBatchSize)
-
-if (fltTestSetFrac > 0):
-    objTestLoader  = DataLoader(objTestDataset, shuffle = blnShuffleData, batch_size = intBatchSize)
-
-
-# In[ ]:
-
-
-# TEST: Get one batch of training data and see how it looks
-iterTrainLoader = iter(objTrainLoader)  # Convert objTrainLoader into an iterator
+# ---------------------------------------------------------------------------
+# Quick sanity check: pull one batch and inspect shape
+# ---------------------------------------------------------------------------
+iterTrainLoader = iter(objTrainLoader)
 arrTrainDataBatch, arrTrainLabelsBatch = next(iterTrainLoader)
 
-print('arrTrainDataBatch.shape = {}, arrTrainLabelsBatch = {}'.format(arrTrainDataBatch.shape, arrTrainLabelsBatch.shape))
+print('arrTrainDataBatch.shape = {}, arrTrainLabelsBatch = {}'.format(
+    arrTrainDataBatch.shape, arrTrainLabelsBatch.shape))
 print('arrTrainLabelsBatch = {}'.format(arrTrainLabelsBatch))
-
-# Check that the data contained in arrTrainingDataBatchFirst[] and arrTrainDataBatch[]
-# are still consistent (data will not match if blnShuffleData = True)
-print('arrTrainingDataBatchFirst = \n{}'.format(arrTrainingDataBatchFirst[0:3, 0:10, 0]))
-print('arrTrainDataBatch = \n{}'.format(arrTrainDataBatch[0:3, 0:10, 0]))
-
 print()
 
 
 # In[ ]:
 
 
-# Check if a GPU is available and if so, set a device to use
+# Report GPU status
 
 intGPUDevice = argGPUDevice
-
-blnTrainOnGPU = torch.cuda.is_available()
 
 if(blnTrainOnGPU):
     intNumGPUs = torch.cuda.device_count()
     print('Training on GPU ({} available):'.format(intNumGPUs))
     for intGPU in range(intNumGPUs):
         print('  Device {}: {}'.format(intGPU, torch.cuda.get_device_name(intGPU)))
-    torch.cuda.set_device(intGPUDevice)
     print('Using GPU #{}'.format(intGPUDevice))
 else:
     print('No GPU available, training on CPU')
@@ -776,7 +562,10 @@ print('intTotalParams = {} ({})'.format(intTotalParams, type(intTotalParams)))
 print()
 
 # Print the size of the dataset
-print('Dataset size = intTrainNumSegments * intTrainSeqLen * intTrainNumChannels = {} x {} x {} = {} ({})'.format(intTrainNumSegments, intTrainSeqLen, intTrainNumChannels, intTrainNumSegments * intTrainSeqLen * intTrainNumChannels, arrTrainingData.dtype))
+intTrainNumSegments = len(objTrainLoader.dataset)
+print('Dataset: {} windows x {} timepts x {} channels = {} values'.format(
+    intTrainNumSegments, intTrainSeqLen, intTrainNumChannels,
+    intTrainNumSegments * intTrainSeqLen * intTrainNumChannels))
 print()
 
 
@@ -830,8 +619,8 @@ intValPerEpoch = argValPerEpoch  # Number of validation loops per epoch
 fltGradClip    = argGradClip     # Value at which gradient is clipped
 
 # Calculate validation loss every n training batches/steps
-intNumBatchLoops = int(round(arrTrainingData.shape[0] / intBatchSize))
-intPrintEvery = intNumBatchLoops // intValPerEpoch
+intNumBatchLoops = len(objTrainLoader)
+intPrintEvery = max(1, intNumBatchLoops // intValPerEpoch)
 
 print('intNumEpochs = {}, intValPerEpoch = {}, intPrintEvery = {}, fltGradClip = {}'.format(intNumEpochs, intValPerEpoch, intPrintEvery, fltGradClip))
 print()
@@ -852,24 +641,17 @@ print('Training started on {}'.format(utils.fnGetDatetime(datTrainingStart)))
 for intEpoch in range(intNumEpochs):
     print('intEpoch = {}'.format(intEpoch + 1))
     
-    # Initialize hidden and cell states
-    arrHiddenState = objModelLSTM.initHidden(intBatchSize, blnTrainOnGPU, argDebug = False)  # Batch size defined above when creating DataLoader
-
     # Batch loop (each loop trains one batch of input data)
     for arrInputData, arrLabels in objTrainLoader:
         print('  intBatchLoopIdx = {}.{} (batch size = {})'.format(intEpoch + 1, intBatchLoopIdx + 1, arrInputData.shape[0]))
         intBatchLoopIdx += 1  # New batch/training loop
-        
-        # If batch size allocated from DataLoader is smaller than intBatchSize
-        # (which happens on the last batch when the data set is not divisible
-        # by intBatchSize), break out of the loop
-        
-        # TODO: This is the strategy for now until we figure out what the best
-        #       strategy is on how/whether to initialize the hidden state with
-        #       a smaller batch size for the last orphan batch
-        if (intBatchSize != arrInputData.shape[0]):
-            print('    Exiting training loop (intBatchSize = {}, arrInputData.shape[0] = {})'.format(intBatchSize, arrInputData.shape[0]))
-            break
+
+        # Dynamic hidden-state init: if batch size changed (last orphan batch),
+        # create a new hidden state of the correct size instead of skipping data
+        if arrInputData.shape[0] != intBatchSize:
+            arrHiddenState = objModelLSTM.initHidden(arrInputData.shape[0], blnTrainOnGPU, argDebug = False)
+        else:
+            arrHiddenState = objModelLSTM.initHidden(intBatchSize, blnTrainOnGPU, argDebug = False)
         
         if(blnTrainOnGPU):
             arrInputData, arrLabels = arrInputData.cuda(), arrLabels.cuda()
@@ -921,7 +703,6 @@ for intEpoch in range(intNumEpochs):
             print('  Calculating loss statistics...')
             
             # Get validation loss
-            arrValHiddenState = objModelLSTM.initHidden(intBatchSize, blnTrainOnGPU, argDebug = False)
             lstValidationBatchLosses = []
             
             objModelLSTM.eval()
@@ -929,16 +710,8 @@ for intEpoch in range(intNumEpochs):
             for arrInputData, arrLabels in objValLoader:
                 print('    In batch loop... (batch size = {})'.format(arrInputData.shape[0]))
                 
-                # If batch size allocated from DataLoader is smaller than intBatchSize
-                # (which happens on the last batch when the data set is not divisible
-                # by intBatchSize), break out of the loop
-
-                # TODO: This is the strategy for now until we figure out what the best
-                #       strategy is on how/whether to initialize the hidden state with
-                #       a smaller batch size for the last orphan batch
-                if (intBatchSize != arrInputData.shape[0]):
-                    print('    Exiting validation loop (intBatchSize = {}, arrInputData.shape[0] = {})'.format(intBatchSize, arrInputData.shape[0]))
-                    break
+                # Dynamic hidden state for varying batch sizes (last orphan batch)
+                arrValHiddenState = objModelLSTM.initHidden(arrInputData.shape[0], blnTrainOnGPU, argDebug = False)
                 
                 # Creating new variables for the hidden state, otherwise
                 # we'd backprop through the entire training history
@@ -1012,8 +785,8 @@ dctModelProperties = {
     'strCSVName':           strCSVName,
     'strModelName':         strModelName,
     
-    'lstTrainingFiles':     sorted(set(lstTrainingFilenames)),
-    'lstTrainingChannels':  lstTrainingChannels[0],  # TODO: Assumes that the list of channels are identical across all data subsequences
+    'lstTrainingFiles':     sorted(set(objFullDataset.files)),
+    'lstTrainingChannels':  lstTrainingChannels,  # TODO: Assumes that the list of channels are identical across all data subsequences
     
     'fltResamplingFreq':    argResamplingFreq,
     'fltSubSeqDuration':    argSubSeqDuration,
@@ -1026,7 +799,7 @@ dctModelProperties = {
     'fltScaledMax':         argScaledMax,
     'tupScalingInfo':       tupScalingInfo,
     
-    'intImbalFactor':       intImbalFactor,
+    'intImbalFactor':       0,  # 0 = we used WeightedRandomSampler instead of physical oversampling
     
     'fltValSetFrac':        argValSetFrac,
     'fltTestSetFrac':       argTestSetFrac,
@@ -1045,8 +818,8 @@ dctModelProperties = {
 if (blnBatchMode):
     dctModelProperties['strLogFilename'] = strLogFilename  # Record log file only if it exists (when trained in batch mode)
 
-LSTM.fnSaveLSTMModel(strModelDir, strModelName, intTrainNumChannels, intTrainSeqLen, intTrainNumSegments, 
-                     objModelLSTM, intNumEpochs, intBatchSize, blnShuffleIndices, blnShuffleData, fltLearningRate, intPrintEvery, fltGradClip, 
+LSTM.fnSaveLSTMModel(strModelDir, strModelName, intTrainNumChannels, intTrainSeqLen, intTrainNumSegments,
+                     objModelLSTM, intNumEpochs, intBatchSize, argShuffleIndices, argShuffleData, fltLearningRate, intPrintEvery, fltGradClip,
                      lstTrainingStepLosses, lstValidationStepLosses, **dctModelProperties)
 
 print()
@@ -1061,31 +834,18 @@ blnDebug = True
 lstTestLosses = []  # Record test losses per batch/step
 intNumCorrect = 0   # Number of correctly predicted sequences in a batch size of (intBatchSize)
 
-# Initialize hidden and cell states
-arrHiddenState = objModelLSTM.initHidden(intBatchSize, blnTrainOnGPU, argDebug = False)  # Batch size defined above when creating DataLoader
-
 # Move the model to the GPU if one is available
 if(blnTrainOnGPU):
     objModelLSTM.cuda()
 
 objModelLSTM.eval()
 
-#objTestLoader = objLabeledTestLoader
-
 # Batch loop (each loop trains one batch of input data)
 for arrInputData, arrLabels in objTestLoader:
     print('Feed forwarding new test batch...')
-    
-    # If batch size allocated from DataLoader is smaller than intBatchSize
-    # (which happens on the last batch when the data set is not divisible
-    # by intBatchSize), break out of the loop
 
-    # TODO: This is the strategy for now until we figure out what the best
-    #       strategy is on how/whether to initialize the hidden state with
-    #       a smaller batch size for the last orphan batch
-    if (intBatchSize != arrInputData.shape[0]):
-        print('Exiting test loop (intBatchSize = {}, arrInputData.shape[0] = {})'.format(intBatchSize, arrInputData.shape[0]))
-        break
+    # Dynamic hidden state for varying batch sizes (last orphan batch)
+    arrHiddenState = objModelLSTM.initHidden(arrInputData.shape[0], blnTrainOnGPU, argDebug = False)
                 
     if(blnTrainOnGPU):
         arrInputData, arrLabels = arrInputData.cuda(), arrLabels.cuda()
@@ -1173,10 +933,12 @@ if (blnBatchMode):
     print('  strFromEmail = {}'.format(strFromEmail))
     print('  strToEmails = {}'.format(strToEmails))
 
-    strSubject = 'Script execution ended (scrTrainLSTM.py)'
-    strBody = 'scrTrainLSTM.py finished execution\nDuration = {}\nLog file = {}'.format(datScriptDuration, strLogFilename)
-
-    utils.fnSendMail(strGmailSMTPServer, intGmailSMTPPort, strEmailLogin, strEmailPasswd, strFromEmail, strToEmails, strSubject, strBody)
+    if strEmailLogin and strFromEmail and strToEmails:
+        strSubject = 'Script execution ended (scrTrainLSTM.py)'
+        strBody = 'scrTrainLSTM.py finished execution\nDuration = {}\nLog file = {}'.format(datScriptDuration, strLogFilename)
+        utils.fnSendMail(strGmailSMTPServer, intGmailSMTPPort, strEmailLogin, strEmailPasswd, strFromEmail, strToEmails, strSubject, strBody)
+    else:
+        print('  (skipped – no email credentials provided)')
 
 
 # In[ ]:

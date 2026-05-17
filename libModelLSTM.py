@@ -4,6 +4,7 @@
 # In[ ]:
 
 
+import os
 import torch
 import torch.nn as nn
 
@@ -166,7 +167,7 @@ def fnSaveLSTMModel(argModelDir, argModelName, argNumChannels, argSeqLen, argNum
     if (argDebug): print(dctModelCheckPt)
     
     # Save model to file system with 'write' and 'binary' options
-    with open(argModelDir + argModelName, 'wb') as objModelFile:
+    with open(os.path.join(argModelDir, argModelName), 'wb') as objModelFile:
         torch.save(dctModelCheckPt, objModelFile)
 
 
@@ -176,7 +177,7 @@ def fnSaveLSTMModel(argModelDir, argModelName, argNumChannels, argSeqLen, argNum
 def fnLoadLSTMModel(argModelDir, argModelName, argDebug = False):
     print('Loading model: argModelName = {}'.format(argModelName))
     
-    with open(argModelDir + argModelName, 'rb') as objModelFile:
+    with open(os.path.join(argModelDir, argModelName), 'rb') as objModelFile:
         dctModelCheckPt = torch.load(objModelFile, weights_only=False)
 
     # Extract saved parameters from the model file

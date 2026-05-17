@@ -1,0 +1,22 @@
+# EEG Seizure Prediction — LSTM Pipeline
+# Target: Python 3.10+, PyTorch 2.x, CUDA 12.x
+
+# Core
+numpy>=1.26
+scipy>=1.11
+
+# Deep learning
+torch>=2.1
+
+# EDF I/O
+pyedflib>=0.1.30
+
+# PhysioNet annotation reader (for CHB-MIT .seizures files)
+wfdb>=4.1
+
+# Plotting & utilities
+matplotlib>=3.8
+
+# System / misc
+psutil>=5.9
+pytz>=2023.3

@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 
 # bash runTrainLSTM.sh
+#
+# Cloud-optimized defaults for 16 GB RAM / 6 GB VRAM (e.g., RTX 4050)
+# - 128 Hz resampling (halves memory vs 256 Hz)
+# - 5-second windows (fewer, richer samples)
+# - batch size 16 (fits 6 GB VRAM)
+# - num_workers 4 (parallel data loading)
+# - Uses WeightedRandomSampler instead of physical oversampling
 
-# CHB-MIT: Train using interictal + ictal (chb15 subset) with ictal augmentation (use the earlier
-#          seizures for training, reserved the later ones for testing)
-python scrTrainLSTM.py -csv './DataCSVs/CHB-MIT/chb15.csv' -tcsv './DataCSVs/CHB-MIT/chb15_Test.csv' -rf -1 -du 1 -bs 32 -smod 1 -smin -1 -smax 1 -vf 0.2 -tf 0.1 -gpu 0 -hd 256 -nl 2 -os 3 -dr 0.5 -opt 0 -lr 0.001 -ep 1 -lg RodentSys -pw 1234 -fr RodentSys@gmail.com -to 4089300606@txt.att.net
+python scrTrainLSTM.py \
+  -csv './DataCSVs/CHB-MIT/chb01.csv' \
+  -tcsv './DataCSVs/CHB-MIT/chb01_Test.csv' \
+  -rf 128 -du 5 -bs 16 -smod 1 -smin -1 -smax 1 \
+  -vf 0.2 -tf 0.1 -gpu 0 -nw 4 \
+  -hd 256 -nl 2 -os 3 -dr 0.5 \
+  -opt 0 -lr 0.001 -ep 10 -ve 20

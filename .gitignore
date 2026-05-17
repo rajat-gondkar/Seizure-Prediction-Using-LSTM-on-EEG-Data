@@ -1,2 +1,16 @@
 venv/
 Images/
+
+# Data & artifacts (large / generated files)
+Data/
+DataCSVs/
+Logs/
+SavedModels/
+SavedAnno/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.pyc
