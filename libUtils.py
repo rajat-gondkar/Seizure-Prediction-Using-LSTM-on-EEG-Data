@@ -187,10 +187,12 @@ def fnMinMaxScaler(argData, argScaledMinMax, argDataMinMax, argDebug = False):
 
 # Convert a tensor back to an np.array
 def fnTensor2Array(argTensor, argTrainOnGPU):
+    # detach() first — tensors from model outputs may still have requires_grad=True
+    arr = argTensor.detach()
     if (argTrainOnGPU):
-        return argTensor.cpu().numpy()
+        return arr.cpu().numpy()
     else:
-        return argTensor.numpy()
+        return arr.numpy()
 
 
 # In[ ]:
