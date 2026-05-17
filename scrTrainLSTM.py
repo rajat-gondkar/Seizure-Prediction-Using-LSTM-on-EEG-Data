@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 import libDataIO as dio
 import libModelLSTM as LSTM
 import libUtils as utils
@@ -639,11 +644,16 @@ print('Training started on {}'.format(utils.fnGetDatetime(datTrainingStart)))
 
 # Train for a specified number of epochs
 for intEpoch in range(intNumEpochs):
-    print('intEpoch = {}'.format(intEpoch + 1))
-    
+    print('\nEpoch {}/{}'.format(intEpoch + 1, intNumEpochs))
+
+    # Wrap training batches in a progress bar
+    train_iter = objTrainLoader
+    if tqdm:
+        train_iter = tqdm(objTrainLoader, desc="Train", unit="batch",
+                          total=len(objTrainLoader), ncols=80, leave=False)
+
     # Batch loop (each loop trains one batch of input data)
-    for arrInputData, arrLabels in objTrainLoader:
-        print('  intBatchLoopIdx = {}.{} (batch size = {})'.format(intEpoch + 1, intBatchLoopIdx + 1, arrInputData.shape[0]))
+    for arrInputData, arrLabels in train_iter:
         intBatchLoopIdx += 1  # New batch/training loop
 
         # Dynamic hidden-state init: if batch size changed (last orphan batch),
@@ -652,97 +662,72 @@ for intEpoch in range(intNumEpochs):
             arrHiddenState = objModelLSTM.initHidden(arrInputData.shape[0], blnTrainOnGPU, argDebug = False)
         else:
             arrHiddenState = objModelLSTM.initHidden(intBatchSize, blnTrainOnGPU, argDebug = False)
-        
+
         if(blnTrainOnGPU):
             arrInputData, arrLabels = arrInputData.cuda(), arrLabels.cuda()
 
         # Extract new variables for the hidden and cell states to decouple states
         # from backprop history. Otherwise the gradient will be backpropagated
         # through the entire training history
-        arrHiddenState = tuple([arrState.data for arrState in arrHiddenState])  # Getting only the data portion
-                                                                                # of the hidden/cell states detaches
-                                                                                # them from the backprop history
+        arrHiddenState = tuple([arrState.data for arrState in arrHiddenState])
 
         # Zero the accumulated gradients
         objModelLSTM.zero_grad()
 
-        if (blnDebug):
-            print('    arrInputData.shape = {}, arrInputData.type() = {}'.format(arrInputData.shape, arrInputData.type()))
-            print('    arrLabels.shape = {}, arrLabels.type() = {}'.format(arrLabels.shape, arrLabels.type()))
-            print('    arrHiddenState.shape = ({}, {}), arrHiddenState.type() = ({}, {})'.format(arrHiddenState[0].shape, arrHiddenState[1].shape, arrHiddenState[0].type(), arrHiddenState[1].type()))
-            print('    arrLabels = {}'.format(arrLabels))
-            
-        # Forward pass through the model and get the next hidden state and output
-        # Output shape = (batch_size, 1), h shape = (n_layers, batch_size, hidden_dim)
+        # Forward pass
         arrOutput, arrHiddenState = objModelLSTM.forward(arrInputData, arrHiddenState, argDebug = False)
 
-        if (blnDebug):
-            print('    arrOutput.shape = {}, arrOutput.type() = {}'.format(arrOutput.shape, arrOutput.type()))
-            print('    arrHiddenState.shape = ({}, {}), arrHiddenState.type() = ({}, {})'.format(arrHiddenState[0].shape, arrHiddenState[1].shape, arrHiddenState[0].type(), arrHiddenState[1].type()))
-            print('    arrOutput = \n{}'.format(arrOutput))
-        
-        # Calculate the loss and perform backprop (looks like output shape is
-        # not changed after the squeeze)
-        # NOTE: arrOutput[] is returned as float since the values are close to
-        #       (but not exactly) 0 or 1. However, arrLabels[] is expected to
-        #       be of type long)
-        fltTrainingLoss = objCriterion(arrOutput, arrLabels)  # arrOutput[] = float, arrLabels[] = long
-        print('    fltTrainingLoss = {:.6f} ({})'.format(fltTrainingLoss, fltTrainingLoss.type()))
-        
+        # Calculate the loss and perform backprop
+        fltTrainingLoss = objCriterion(arrOutput, arrLabels)
         fltTrainingLoss.backward()
-        if (blnDebug):
-            print('    arrOutput.squeeze().shape = {}'.format(arrOutput.squeeze().shape))
-        
-        # Using clip_grad_norm() helps prevent the exploding gradient
-        # problem in RNNs / LSTMs
+
+        # Using clip_grad_norm() helps prevent the exploding gradient problem in RNNs / LSTMs
         nn.utils.clip_grad_norm_(objModelLSTM.parameters(), fltGradClip)
         objOptimizer.step()
 
-        # Calculate loss statistics
+        # Update progress bar with current loss
+        if tqdm and hasattr(train_iter, 'set_postfix'):
+            train_iter.set_postfix(loss=f"{fltTrainingLoss.item():.4f}")
+
+        # Calculate loss statistics periodically
         if (intBatchLoopIdx % intPrintEvery == 0):
-            print('  Calculating loss statistics...')
-            
+
             # Get validation loss
             lstValidationBatchLosses = []
-            
             objModelLSTM.eval()
-            
-            for arrInputData, arrLabels in objValLoader:
-                print('    In batch loop... (batch size = {})'.format(arrInputData.shape[0]))
-                
+
+            val_iter = objValLoader
+            if tqdm:
+                val_iter = tqdm(objValLoader, desc="Val", unit="batch",
+                                total=len(objValLoader), ncols=80, leave=False)
+
+            for arrInputData, arrLabels in val_iter:
                 # Dynamic hidden state for varying batch sizes (last orphan batch)
                 arrValHiddenState = objModelLSTM.initHidden(arrInputData.shape[0], blnTrainOnGPU, argDebug = False)
-                
-                # Creating new variables for the hidden state, otherwise
-                # we'd backprop through the entire training history
                 arrValHiddenState = tuple([arrState.data for arrState in arrValHiddenState])
 
                 if(blnTrainOnGPU):
                     arrInputData, arrLabels = arrInputData.cuda(), arrLabels.cuda()
 
                 arrOutput, arrValHiddenState = objModelLSTM.forward(arrInputData, arrValHiddenState)
-                
                 fltValidationLoss = objCriterion(arrOutput, arrLabels)
-                print('    fltValidationLoss = {:.6f} ({})'.format(fltValidationLoss, fltValidationLoss.type()))
-
                 lstValidationBatchLosses.append(fltValidationLoss.item())
 
+                if tqdm and hasattr(val_iter, 'set_postfix'):
+                    val_iter.set_postfix(vloss=f"{fltValidationLoss.item():.4f}")
+
             objModelLSTM.train()
-            
-            # Clear the GPU cache regularly to avoid the following CUDA error:
-            #
-            #   RuntimeError: CUDA out of memory. Tried to allocate 6.61 GiB 
-            #   (GPU 1; 10.76 GiB total capacity; 1.25 GiB already allocated; 
-            #   2.39 GiB free; 6.38 GiB cached)
+
+            # Clear the GPU cache regularly
             torch.cuda.empty_cache()
-            
-            print('  Epoch: {}/{}...'.format(intEpoch + 1, intNumEpochs),
-                  'Step: {}...'.format(intBatchLoopIdx),
-                  'Training Loss: {:.6f}...'.format(fltTrainingLoss.item()),
-                  'Validation Loss: {:.6f}'.format(np.mean(lstValidationBatchLosses)))
-            
-            lstTrainingStepLosses.append(fltTrainingLoss.item())
-            lstValidationStepLosses.append(np.mean(lstValidationBatchLosses))
+
+            mean_train_loss = fltTrainingLoss.item()
+            mean_val_loss = np.mean(lstValidationBatchLosses) if lstValidationBatchLosses else 0.0
+            print('  Epoch: {}/{}  Step: {}  TrainLoss: {:.4f}  ValLoss: {:.4f}'
+                  .format(intEpoch + 1, intNumEpochs, intBatchLoopIdx, mean_train_loss, mean_val_loss))
+
+            lstTrainingStepLosses.append(mean_train_loss)
+            lstValidationStepLosses.append(mean_val_loss)
             
 print()
 

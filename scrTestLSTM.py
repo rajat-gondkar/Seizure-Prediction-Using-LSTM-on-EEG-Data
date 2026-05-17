@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 import libDataIO as dio
 import libModelLSTM as LSTM
 import libUtils as utils
@@ -74,6 +79,8 @@ if (blnBatchMode):
     objArgParse.add_argument('-gpu',  '--gpudevice',         required = False, default = -1,    help = '')
     objArgParse.add_argument('-nw',   '--numworkers',        required = False, default = 4,     help = '')
     objArgParse.add_argument('-sa',   '--saveanno',          required = False, default = False, help = '')
+    objArgParse.add_argument('-pl',   '--plot',              required = False, default = True,  help = '')
+    objArgParse.add_argument('-rd',   '--resultsdir',        required = False, default = './Results', help = '')
 
     dctArgs = vars(objArgParse.parse_args())
 
@@ -99,6 +106,8 @@ if (blnBatchMode):
     argGPUDevice         = int(dctArgs['gpudevice'])
     argNumWorkers        = int(dctArgs['numworkers'])
     argSaveAnno          = dctArgs['saveanno']
+    argPlot              = dctArgs['plot'] in (True, 'True', 'true', '1', 1)
+    argResultsDir        = dctArgs['resultsdir']
     
 else:
     # Set all configurable parameters of the script as arguments. After
@@ -389,6 +398,7 @@ intNumCorrect = 0   # Number of correctly predicted sequences
 
 # Collect results dynamically (since we no longer exclude orphan batches)
 lstTestResults = []  # Will collect (uuid, label, prediction) tuples
+lstTestProbs   = []  # Will collect softmax probability vectors
 
 # Move the model to the GPU if one is available
 if (blnTrainOnGPU):
@@ -396,52 +406,61 @@ if (blnTrainOnGPU):
     
 objModelLSTM.eval()
 
+# Wrap test batches in a progress bar
+test_iter = objTestLoader
+if tqdm:
+    test_iter = tqdm(objTestLoader, desc="Test", unit="batch",
+                     total=len(objTestLoader), ncols=80)
+
 # Batch loop (each loop feeds one batch of input data)
-for arrInputData, arrLabels in objTestLoader:
+for arrInputData, arrLabels in test_iter:
     intBatchSizeActual = arrInputData.shape[0]
-    print('Feed forwarding new test batch (size={})...'.format(intBatchSizeActual))
-    
+
     # Dynamic hidden state for varying batch sizes (last orphan batch)
     arrHiddenState = objModelLSTM.initHidden(intBatchSizeActual, blnTrainOnGPU, argDebug = False)
-        
+
     if (blnTrainOnGPU):
         arrInputData, arrLabels = arrInputData.cuda(), arrLabels.cuda()
-    
+
     # Extract new variables for the hidden and cell states to decouple states
     # from backprop history
     arrHiddenState = tuple([arrState.data for arrState in arrHiddenState])
 
     # Forward pass
     arrOutput, arrHiddenState = objModelLSTM.forward(arrInputData, arrHiddenState, argDebug = False)
-    
-    if (blnDebug):
-        print('  arrLabels = {}'.format(arrLabels))
-        print('  arrOutput = \n{}'.format(arrOutput))
-    
+
     # Calculate test loss for this batch
     fltTestLoss = objCriterion(arrOutput, arrLabels)
-    print('  fltTestLoss = {:.6f} ({})'.format(fltTestLoss, fltTestLoss.type()))
-    
+
     # Record test loss for this batch
     lstTestLosses.append(fltTestLoss.item())
-    
-    # Convert output scores between classes to predictions
+
+    # Get class probabilities (for ROC curves) and predictions
+    arrProbs = torch.softmax(arrOutput, dim=1)
     _, arrPredictions = torch.max(arrOutput, 1)
-    
+
     # Compare the class predictions to the test set labels
     arrCorrect = arrPredictions.eq(arrLabels)
     arrCorrect = utils.fnTensor2Array(arrCorrect, blnTrainOnGPU)
     intNumCorrect += np.sum(arrCorrect)
-    
+
     # Convert tensors back to np.arrays
     arrLabels_np = utils.fnTensor2Array(arrLabels, blnTrainOnGPU)
     arrPredictions_np = utils.fnTensor2Array(arrPredictions, blnTrainOnGPU)
-    
+
     # Generate sequential UUIDs for this batch
     intStartUUID = len(lstTestResults)
     for i in range(intBatchSizeActual):
         lstTestResults.append([intStartUUID + i, int(arrLabels_np[i]), int(arrPredictions_np[i])])
-    
+
+    # Collect probabilities for ROC / PR curves
+    lstTestProbs.append(utils.fnTensor2Array(arrProbs, blnTrainOnGPU))
+
+    # Update progress bar
+    if tqdm and hasattr(test_iter, 'set_postfix'):
+        test_iter.set_postfix(loss=f"{fltTestLoss.item():.4f}",
+                              acc=f"{intNumCorrect}/{len(lstTestResults)}")
+
     # Clear the GPU cache regularly
     torch.cuda.empty_cache()
     
@@ -508,7 +527,134 @@ if argSaveAnno:
     print()
 
 
-# In[ ]:
+# In[ ]
+
+
+# ---------------------------------------------------------------------------
+# Generate result plots
+# ---------------------------------------------------------------------------
+if argPlot:
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from sklearn.metrics import confusion_matrix, roc_curve, auc
+        from sklearn.preprocessing import label_binarize
+
+        strResultsDir = os.path.join(argResultsDir, strTimestamp)
+        os.makedirs(strResultsDir, exist_ok=True)
+        print('\nGenerating result plots in: {}'.format(strResultsDir))
+
+        lstClassNames = ['interictal', 'preictal', 'ictal']
+        y_true = arrTestResults_Sorted[:, 1]
+        y_pred = arrTestResults_Sorted[:, 2]
+
+        # 1. Training / validation loss curves (from saved model)
+        if lstTrainingStepLosses and lstValidationStepLosses:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(lstTrainingStepLosses, label='Training Loss', alpha=0.7)
+            ax.plot(lstValidationStepLosses, label='Validation Loss', alpha=0.7)
+            ax.set_xlabel('Step')
+            ax.set_ylabel('Loss')
+            ax.set_title('Training & Validation Loss')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            fig.savefig(os.path.join(strResultsDir, 'loss_curves.png'), dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print('  ✓ loss_curves.png')
+
+        # 2. Confusion matrix (raw counts)
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        ax.figure.colorbar(im, ax=ax)
+        ax.set(xticks=[0, 1, 2], yticks=[0, 1, 2],
+               xticklabels=lstClassNames, yticklabels=lstClassNames,
+               xlabel='Predicted', ylabel='True',
+               title='Confusion Matrix')
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, format(cm[i, j], 'd'),
+                        ha="center", va="center",
+                        color="white" if cm[i, j] > thresh else "black")
+        fig.savefig(os.path.join(strResultsDir, 'confusion_matrix.png'), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print('  ✓ confusion_matrix.png')
+
+        # 3. Normalized confusion matrix
+        cm_norm = cm.astype('float') / np.maximum(cm.sum(axis=1)[:, np.newaxis], 1)
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(cm_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
+        ax.figure.colorbar(im, ax=ax)
+        ax.set(xticks=[0, 1, 2], yticks=[0, 1, 2],
+               xticklabels=lstClassNames, yticklabels=lstClassNames,
+               xlabel='Predicted', ylabel='True',
+               title='Normalized Confusion Matrix')
+        thresh = cm_norm.max() / 2.
+        for i in range(cm_norm.shape[0]):
+            for j in range(cm_norm.shape[1]):
+                ax.text(j, i, format(cm_norm[i, j], '.2f'),
+                        ha="center", va="center",
+                        color="white" if cm_norm[i, j] > thresh else "black")
+        fig.savefig(os.path.join(strResultsDir, 'confusion_matrix_norm.png'), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print('  ✓ confusion_matrix_norm.png')
+
+        # 4. ROC curves (One-vs-Rest)
+        if lstTestProbs:
+            arrAllProbs = np.concatenate(lstTestProbs, axis=0)
+            y_true_bin = label_binarize(y_true, classes=[0, 1, 2])
+            fig, ax = plt.subplots(figsize=(7, 6))
+            colors = ['blue', 'green', 'red']
+            for i, color in zip(range(3), colors):
+                if y_true_bin[:, i].sum() > 0:
+                    fpr, tpr, _ = roc_curve(y_true_bin[:, i], arrAllProbs[:, i])
+                    roc_auc = auc(fpr, tpr)
+                    ax.plot(fpr, tpr, color=color, lw=2,
+                            label='{} (AUC = {:.2f})'.format(lstClassNames[i], roc_auc))
+            ax.plot([0, 1], [0, 1], 'k--', lw=1)
+            ax.set_xlim([0.0, 1.0])
+            ax.set_ylim([0.0, 1.05])
+            ax.set_xlabel('False Positive Rate')
+            ax.set_ylabel('True Positive Rate')
+            ax.set_title('ROC Curves (One-vs-Rest)')
+            ax.legend(loc='lower right')
+            ax.grid(True, alpha=0.3)
+            fig.savefig(os.path.join(strResultsDir, 'roc_curves.png'), dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print('  ✓ roc_curves.png')
+
+        # 5. Per-class precision / recall / F1 bar chart
+        precision = np.diag(cm) / np.maximum(cm.sum(axis=0), 1)
+        recall    = np.diag(cm) / np.maximum(cm.sum(axis=1), 1)
+        f1        = 2 * (precision * recall) / np.maximum(precision + recall, 1e-8)
+
+        x = np.arange(len(lstClassNames))
+        width = 0.25
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.bar(x - width, precision, width, label='Precision', alpha=0.8)
+        ax.bar(x,         recall,    width, label='Recall',    alpha=0.8)
+        ax.bar(x + width, f1,        width, label='F1-Score',  alpha=0.8)
+        ax.set_ylabel('Score')
+        ax.set_title('Per-Class Classification Metrics')
+        ax.set_xticks(x)
+        ax.set_xticklabels(lstClassNames)
+        ax.set_ylim([0, 1.05])
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        fig.savefig(os.path.join(strResultsDir, 'per_class_metrics.png'), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print('  ✓ per_class_metrics.png')
+
+        print('Done! All plots saved to: {}'.format(strResultsDir))
+
+    except Exception as exc:
+        print('\nPlotting skipped due to error: {}'.format(exc))
+        print('(Test metrics above are still valid.)')
+
+
+# In[ ]
 
 
 if (blnBatchMode):

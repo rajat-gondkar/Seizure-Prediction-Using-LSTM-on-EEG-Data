@@ -15,6 +15,52 @@ The model was originally designed for the [CHB-MIT Scalp EEG Database](https://p
 
 ---
 
+## Recommended Starting Patients
+
+The CHB-MIT dataset contains 22 patients, but **5 very young children** have developmentally different EEG patterns that can confuse a general model:
+
+| Exclude | Age | Reason |
+|-----------|-----|--------|
+| chb06 | 1.5 yr | EEG still maturing; patterns very different |
+| chb08 | 3.5 yr | Too young, high noise |
+| chb10 | 3 yr | Developmentally abnormal EEG |
+| chb12 | 2 yr | Extremely immature EEG |
+| chb13 | 3 yr | Developmentally abnormal EEG |
+
+**Best 11 patients to start with** (half the dataset, good age spread, plenty of seizures):
+
+```
+chb01  chb02  chb03  chb04  chb07  chb09  chb11  chb14  chb15  chb18  chb24
+```
+
+Download them with:
+```bash
+python3 setup_chbmit.py --mode full \
+  --patients chb01,chb02,chb03,chb04,chb07,chb09,chb11,chb14,chb15,chb18,chb24 \
+  --yes
+```
+
+---
+
+## How Training Works (Simple)
+
+**One model, one CSV.**
+
+The training script reads **all EDF files listed in your CSV** and trains **a single LSTM model** on all of them combined.
+
+- **Single-patient model**: CSV has only chb01 files → model learns chb01's patterns only.
+- **Combined model**: CSV has chb01 + chb02 + chb03 → one model learns all three patients together.
+
+There is **no automatic per-patient splitting** inside the script. If you want a separate model for each patient, run training once per patient with a different CSV each time.
+
+**Why combined?** More data = better generalization, but seizure patterns are highly personal. Many papers train patient-specific models for CHB-MIT.
+
+**Why separate?** Each brain is different. A model trained on chb01 may not recognize chb15's seizures.
+
+**Recommendation**: Start with a **combined model on the 11 recommended patients**, then compare with a patient-specific model on chb15 (which has the most seizures).
+
+---
+
 ## Repository Structure
 
 ```
@@ -28,7 +74,7 @@ The model was originally designed for the [CHB-MIT Scalp EEG Database](https://p
 ├── runTrainLSTM.sh          # Example bash command for training
 ├── run_docker.sh            # Docker launch script for GPU environments
 ├── setup_test_data.sh       # One-command setup: downloads a minimal test dataset
-├── setup_minimal_chbmit.py  # Python downloader for a small CHB-MIT subset
+├── setup_chbmit.py          # CHB-MIT dataset downloader (minimal or full)
 ├── SCALABILITY.md           # Known bottlenecks and recommended architectural fixes
 └── README.md                # This file
 ```
@@ -51,13 +97,27 @@ pip install torch numpy scipy matplotlib pyedflib wfdb psutil pytz
 
 ### 2. Download Data
 
-For a **quick smoke test** (3 small files, ~120 MB):
+The same script handles both minimal and full downloads interactively:
+
 ```bash
 source venv/bin/activate
-python3 setup_minimal_chbmit.py
+python3 setup_chbmit.py
 ```
 
-For the **full CHB-MIT dataset** (~24 GB), download from [PhysioNet](https://physionet.org/content/chbmit/1.0.0/) and create CSV manifests pointing to your `.edf` files.
+- Choose **1 (Minimal)** for a quick smoke test (~120 MB, 3 files, patient chb01).
+- Choose **2 (Full)** to download the entire CHB-MIT dataset (~40–45 GB, all 22 patients).
+
+Non-interactive examples:
+```bash
+# Minimal subset (smoke test)
+python3 setup_chbmit.py --mode minimal
+
+# Full dataset (all patients)
+python3 setup_chbmit.py --mode full --yes
+
+# Specific patients only
+python3 setup_chbmit.py --mode full --patients chb01,chb02,chb03 --yes
+```
 
 ### 3. Train
 
@@ -95,11 +155,20 @@ python scrTrainLSTM.py \
 python scrTestLSTM.py \
   -md ./SavedModels/ \
   -mn <your_saved_model.net> \
-  -tcsv ./DataCSVs/CHB-MIT/chb01_Test.csv \
-  -gpu 0 -sa True
+  -tcsv ./DataCSVs/CHB-MIT/chb01_test.csv \
+  -gpu 0 -pl True
 ```
 
-The test script prints accuracy, true/false positive rates, and saves annotation files for visualization in EDFbrowser.
+The test script automatically generates result plots:
+- `loss_curves.png` — training & validation loss over time
+- `confusion_matrix.png` — raw prediction counts
+- `confusion_matrix_norm.png` — normalized (percentage) version
+- `roc_curves.png` — ROC curves with AUC scores (one-vs-rest)
+- `per_class_metrics.png` — precision, recall, and F1 per class
+
+All plots are saved to `./Results/<timestamp>/`.
+
+To disable plots, add `-pl False`.
 
 ---
 
@@ -110,7 +179,7 @@ The test script prints accuracy, true/false positive rates, and saves annotation
 2. **Annotations** — Seizure start/end times are read from `.seizures` (binary) or `.annotation.txt` (text) files. Each recording is split into interictal, preictal, and ictal segments.
 3. **Sliding Window** — Long recordings are broken into overlapping subsequences (e.g., 1-second windows). A subwindow fraction determines the label when a window straddles a boundary.
 4. **Scaling** — Min-max scaling is applied per-channel across the entire dataset (or per-file, configurable).
-5. **Oversampling** — Ictal samples are replicated to combat extreme class imbalance (interictal >> ictal).
+5. **Class Balancing** — A `WeightedRandomSampler` ensures ictal windows are seen as frequently as interictal windows during training, without duplicating data in RAM.
 
 ### Model Architecture
 - **LSTM Layer** — `nn.LSTM(input_dim, hidden_dim, num_layers, dropout=..., batch_first=True)`

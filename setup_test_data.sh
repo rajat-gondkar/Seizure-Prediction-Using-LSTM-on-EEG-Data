@@ -21,7 +21,7 @@ pip install -q numpy scipy matplotlib pyedflib wfdb psutil pytz
 
 echo ""
 echo "Running minimal dataset download & preparation..."
-python3 setup_minimal_chbmit.py
+python3 setup_chbmit.py --mode minimal
 
 echo ""
 echo "=== Setup complete ==="
