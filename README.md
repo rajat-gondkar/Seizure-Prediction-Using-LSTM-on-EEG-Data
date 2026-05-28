@@ -75,6 +75,7 @@ There is **no automatic per-patient splitting** inside the script. If you want a
 ├── run_docker.sh            # Docker launch script for GPU environments
 ├── setup_test_data.sh       # One-command setup: downloads a minimal test dataset
 ├── setup_chbmit.py          # CHB-MIT dataset downloader (minimal or full)
+├── validate_dataset.py      # Pre-flight EDF integrity checker
 ├── SCALABILITY.md           # Known bottlenecks and recommended architectural fixes
 └── README.md                # This file
 ```
@@ -120,6 +121,23 @@ python3 setup_chbmit.py --mode full --patients chb01,chb02,chb03 --yes
 ```
 
 ### 3. Train
+
+### 3. Validate Downloaded Data (Optional but Recommended)
+
+Network interruptions can leave EDF files truncated. Run this **before training** to catch corrupted files:
+
+```bash
+python validate_dataset.py -csv ./DataCSVs/CHB-MIT/chb01.csv
+```
+
+If any file is corrupted, you'll see:
+```
+  ✗ chb01_03.edf  — OSError: cannot read header
+```
+
+Just delete the bad file and re-run `setup_chbmit.py` — it will re-download only what's missing.
+
+### 4. Train
 
 ```bash
 source venv/bin/activate

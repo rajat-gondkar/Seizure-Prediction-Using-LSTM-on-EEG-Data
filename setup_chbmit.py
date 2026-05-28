@@ -84,9 +84,23 @@ def human_size(bytes_val: int) -> str:
 
 
 def download(url: str, dest: Path, timeout: int = 300, show_progress: bool = True) -> bool:
-    """Download a single file. Returns True on success."""
+    """Download a single file. Validates size against Content-Length."""
+    # If file exists, check size against expected size from a HEAD request
+    try:
+        req_head = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
+        with urllib.request.urlopen(req_head, timeout=timeout) as resp_head:
+            expected_size = int(resp_head.headers.get("content-length", 0))
+    except Exception:
+        expected_size = 0
+
     if dest.exists() and dest.stat().st_size > 0:
-        return True  # Already present
+        if expected_size > 0 and dest.stat().st_size == expected_size:
+            return True  # Already present and correct size
+        elif expected_size == 0:
+            return True  # Can't verify, assume OK
+        else:
+            print(f"  ⚠ {dest.name} exists but wrong size ({dest.stat().st_size} != {expected_size}), re-downloading...")
+            dest.unlink()
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -106,6 +120,13 @@ def download(url: str, dest: Path, timeout: int = 300, show_progress: bool = Tru
                     pbar.close()
                 else:
                     fh.write(resp.read())
+
+        # Verify downloaded size
+        if total > 0 and dest.stat().st_size != total:
+            print(f"    ✗ SIZE MISMATCH: {dest.name} ({dest.stat().st_size} != {total})")
+            dest.unlink()
+            return False
+
         return True
     except Exception as exc:
         print(f"    ✗ ERROR downloading {dest.name}: {exc}")

@@ -41,11 +41,17 @@ def _build_window_index_for_file(fpath, fidx, orig_sf, target_sf, subseq_dur_s,
     """
     Scans a single EDF file, reads annotations, breaks it into segments,
     and returns a list of window-metadata dicts (no actual EEG data).
+    If the EDF is corrupted or unreadable, returns an empty list and prints
+    a warning so that one bad file does not crash the entire dataset build.
     """
-    # Read header + full data (we need the array to know n_pts & to call
-    # fnBreakCHBMITSegment, but we discard it immediately after indexing)
-    seg_label, data_edf, seg_dur, sfreq, channels, seq, n_ch, n_pts = \
-        dio.fnReadEDFUsingPyEDFLib(fpath, argNoData=False, argDebug=False)
+    try:
+        # Read header + full data (we need the array to know n_pts & to call
+        # fnBreakCHBMITSegment, but we discard it immediately after indexing)
+        seg_label, data_edf, seg_dur, sfreq, channels, seq, n_ch, n_pts = \
+            dio.fnReadEDFUsingPyEDFLib(fpath, argNoData=False, argDebug=False)
+    except Exception as exc:
+        print(f"[CHBMITDataset] WARNING: skipping corrupted/unreadable file {fpath}: {exc}")
+        return []
 
     # --- Apply scaling if params were pre-computed ---
     if scaling_minmax is not None:
@@ -280,19 +286,25 @@ class CHBMITDataset(Dataset):
         entry = self.index[idx]
         n_read = entry['end_sample'] - entry['start_sample']
 
-        # ---- Read ONLY the needed slice from each channel ----
-        with pyedflib.EdfReader(entry['filename']) as fh:
-            window = np.zeros((self.num_channels, n_read), dtype=self.dtype)
-            ch_idx = 0
-            orig_labels = fh.getSignalLabels()
+        try:
+            # ---- Read ONLY the needed slice from each channel ----
+            with pyedflib.EdfReader(entry['filename']) as fh:
+                window = np.zeros((self.num_channels, n_read), dtype=self.dtype)
+                ch_idx = 0
+                orig_labels = fh.getSignalLabels()
 
-            for i in range(fh.signals_in_file):
-                label = orig_labels[i]
-                if re.match(r'.*E[CK]G.*|.*VNS.*|\s*-\s*|\s*\.\s*', label):
-                    continue
-                signal = fh.readSignal(i, start=entry['start_sample'], n=n_read)
-                window[ch_idx, :] = signal.astype(self.dtype)
-                ch_idx += 1
+                for i in range(fh.signals_in_file):
+                    label = orig_labels[i]
+                    if re.match(r'.*E[CK]G.*|.*VNS.*|\s*-\s*|\s*\.\s*', label):
+                        continue
+                    signal = fh.readSignal(i, start=entry['start_sample'], n=n_read)
+                    window[ch_idx, :] = signal.astype(self.dtype)
+                    ch_idx += 1
+        except Exception as exc:
+            print(f"[CHBMITDataset] ERROR reading window from {entry['filename']} "
+                  f"(sample {entry['start_sample']}:{entry['end_sample']}): {exc}")
+            print("  Tip: run 'python validate_dataset.py -csv <your_csv>' to check for corrupted files.")
+            raise
 
         # ---- Apply scaling if we haven't already at indexing time ----
         # (Scaling was done during index build, but if we want on-the-fly
