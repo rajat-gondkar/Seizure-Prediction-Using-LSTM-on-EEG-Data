@@ -196,14 +196,24 @@ class CHBMITDataset(Dataset):
             raise ValueError(f"No EDF files listed in CSV: {csv_path}")
 
         # ---- Channel consistency check ----
-        dio.fnMatchEDFChannels(self.files)
+        # Returns None if all files match, or a list of common channels if they differ
+        lstCommonChannels = dio.fnMatchEDFChannels(self.files)
 
         # ---- Probe first file for globals ----
         _, _, seg_dur, sfreq, channels, _, n_ch, n_pts = \
             dio.fnReadEDFUsingPyEDFLib(self.files[0], argNoData=True, argDebug=False)
 
-        self.num_channels = n_ch
-        self.channels = channels
+        if lstCommonChannels is not None:
+            # Channels differ across files — use only the common subset
+            self.common_channels = lstCommonChannels
+            self.num_channels = len(lstCommonChannels)
+            self.channels = lstCommonChannels
+            print(f"[CHBMITDataset] Using {len(lstCommonChannels)} common channels instead of {n_ch} from first file")
+        else:
+            # All files have the same channels
+            self.common_channels = None
+            self.num_channels = n_ch
+            self.channels = channels
         self.orig_sampling_freq = sfreq
 
         # ---- Resampling frequency ----
@@ -290,16 +300,34 @@ class CHBMITDataset(Dataset):
             # ---- Read ONLY the needed slice from each channel ----
             with pyedflib.EdfReader(entry['filename']) as fh:
                 window = np.zeros((self.num_channels, n_read), dtype=self.dtype)
-                ch_idx = 0
                 orig_labels = fh.getSignalLabels()
 
-                for i in range(fh.signals_in_file):
-                    label = orig_labels[i]
-                    if re.match(r'.*E[CK]G.*|.*VNS.*|\s*-\s*|\s*\.\s*', label):
-                        continue
-                    signal = fh.readSignal(i, start=entry['start_sample'], n=n_read)
-                    window[ch_idx, :] = signal.astype(self.dtype)
-                    ch_idx += 1
+                if self.common_channels is not None:
+                    # Channels differ across files — read only common channels in consistent order
+                    ch_map = {}
+                    ch_idx_raw = 0
+                    for i in range(fh.signals_in_file):
+                        label = orig_labels[i]
+                        if re.match(r'.*E[CK]G.*|.*VNS.*|\s*-\s*|\s*\.\s*', label):
+                            continue
+                        ch_map[label] = ch_idx_raw
+                        ch_idx_raw += 1
+
+                    for out_idx, ch_name in enumerate(self.common_channels):
+                        if ch_name in ch_map:
+                            signal = fh.readSignal(ch_map[ch_name], start=entry['start_sample'], n=n_read)
+                            window[out_idx, :] = signal.astype(self.dtype)
+                        # else: leave zeros for missing channel
+                else:
+                    # All files have the same channels — read them in order
+                    ch_idx = 0
+                    for i in range(fh.signals_in_file):
+                        label = orig_labels[i]
+                        if re.match(r'.*E[CK]G.*|.*VNS.*|\s*-\s*|\s*\.\s*', label):
+                            continue
+                        signal = fh.readSignal(i, start=entry['start_sample'], n=n_read)
+                        window[ch_idx, :] = signal.astype(self.dtype)
+                        ch_idx += 1
         except Exception as exc:
             print(f"[CHBMITDataset] ERROR reading window from {entry['filename']} "
                   f"(sample {entry['start_sample']}:{entry['end_sample']}): {exc}")

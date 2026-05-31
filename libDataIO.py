@@ -570,28 +570,36 @@ def fnReadEDFUsingPyEDFLib(argFullFilename, argPerformChecks = True, argReturnHe
 
 
 def fnMatchEDFChannels(argFullEDFFiles, argDebug = False):
+    """
+    Compare channel lists across all EDF files.
+
+    If channels match perfectly → returns None.
+    If channels differ → finds the intersection (common channels),
+    prints a warning, and returns the list of common channels.
+
+    The caller should use these common channels when reading data.
+    """
 
     lstAllChannels   = []
     blnMismatchFound = False
     lstMismatches    = ['   ']
-    
+
     # Loop through each file in argFullEDFFiles
     for intFullFilenameIdx, strFullFilename in enumerate(argFullEDFFiles):
-        #print(intFullFilenameIdx, strFullFilename)
-        
+
         # Get the data from each EDF file
         strSegLabel, arrData, fltSegDuration, fltSamplingFreq, lstChannels, intSequence, intNumChannels, intNumTimePts, dictEDFHeader = fnReadEDFUsingPyEDFLib(
             strFullFilename, argPerformChecks = True, argReturnHeader = True, argNoData = True, argDebug = False)
-            
+
         lstAllChannels.append(lstChannels)
-        
+
         if (intFullFilenameIdx > 0):
             if (lstAllChannels[intFullFilenameIdx] != lstAllChannels[intFullFilenameIdx - 1]):
                 blnMismatchFound = True
                 lstMismatches.append('***')
             else:
                 lstMismatches.append('   ')
-                
+
     if (blnMismatchFound or argDebug):
         for intFullFilenameIdx, strFullFilename in enumerate(argFullEDFFiles):
             print('In {}:\n{} Ch = {}'.format(strFullFilename, lstMismatches[intFullFilenameIdx], lstAllChannels[intFullFilenameIdx]))
@@ -599,9 +607,25 @@ def fnMatchEDFChannels(argFullEDFFiles, argDebug = False):
     else:
         print('Channels match in all EDF files')
         print()
-        
+        return None
+
     if (blnMismatchFound):
-        raise Exception('Channels do not match in EDF files!')
+        # Find common channels (intersection of all channel lists)
+        setCommon = set(lstAllChannels[0])
+        for ch_list in lstAllChannels[1:]:
+            setCommon = setCommon.intersection(set(ch_list))
+
+        # Preserve the order from the first file
+        lstCommonChannels = [ch for ch in lstAllChannels[0] if ch in setCommon]
+
+        # Find channels being dropped
+        setDropped = set(lstAllChannels[0]) - setCommon
+        if setDropped:
+            print('Dropping channels not present in all files: {}'.format(sorted(setDropped)))
+
+        print('Using {} common channels across all files: {}'.format(len(lstCommonChannels), lstCommonChannels))
+        print()
+        return lstCommonChannels
 
 
 # In[ ]:
