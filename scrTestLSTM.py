@@ -314,6 +314,7 @@ objTestDataset = chb.CHBMITDataset(
     step_size_states=dctStepSizeStates,
     sub_window_fraction=fltSubWindowFraction,
     anno_suffix='annotation.txt',
+    force_channels=lstTrainingChannels if lstTrainingChannels else None,
     argInfo=True, argDebug=False)
 
 intLabeledTestNumChannels = objTestDataset.num_channels
@@ -339,7 +340,13 @@ if lstTrainingChannels:
     if lstTrainingChannels != objTestDataset.channels:
         print('Training channels:\n  {}'.format(lstTrainingChannels))
         print('Test channels:\n  {}'.format(objTestDataset.channels))
-        raise Exception('Training channels do not match test channels!')
+        # Check if test data has MORE channels than training (common during CHB-MIT)
+        train_set = set(lstTrainingChannels)
+        test_set = set(objTestDataset.channels)
+        if train_set.issubset(test_set):
+            print('  Test data has extra channels — using only the {} training channels'.format(len(lstTrainingChannels)))
+        else:
+            raise Exception('Training channels do not match test channels!')
 
 print('Test dataset: {} windows, {} channels, {} timepts'.format(
     intLabeledTestNumSegments, intLabeledTestNumChannels, intLabeledTestSeqLen))

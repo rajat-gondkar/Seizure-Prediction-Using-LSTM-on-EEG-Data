@@ -178,6 +178,7 @@ class CHBMITDataset(Dataset):
                  scaling_params=(), scaling_info=(), step_size_time_pts=-1,
                  step_size_states=None, sub_window_fraction=-1,
                  anno_suffix='annotation.txt', dtype=np.float32,
+                 force_channels=None,
                  argInfo=False, argDebug=False):
         super().__init__()
 
@@ -185,6 +186,7 @@ class CHBMITDataset(Dataset):
         self.anno_suffix = anno_suffix
         self.debug = argDebug
         self.scaling_params = scaling_params
+        self.force_channels = force_channels
 
         if step_size_states is None:
             step_size_states = {}
@@ -203,7 +205,13 @@ class CHBMITDataset(Dataset):
         _, _, seg_dur, sfreq, channels, _, n_ch, n_pts = \
             dio.fnReadEDFUsingPyEDFLib(self.files[0], argNoData=True, argDebug=False)
 
-        if lstCommonChannels is not None:
+        if self.force_channels is not None:
+            # External channel list provided (e.g., training channels for test data)
+            self.common_channels = self.force_channels
+            self.num_channels = len(self.force_channels)
+            self.channels = self.force_channels
+            print(f"[CHBMITDataset] Using {len(self.force_channels)} forced channels")
+        elif lstCommonChannels is not None:
             # Channels differ across files — use only the common subset
             self.common_channels = lstCommonChannels
             self.num_channels = len(lstCommonChannels)
