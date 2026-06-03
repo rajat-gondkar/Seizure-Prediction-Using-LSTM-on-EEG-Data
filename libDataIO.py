@@ -1039,8 +1039,8 @@ def fnBreakCHBMITSegment(argData, argStartEndTimePts, argSamplingFreq, argPreict
     # Effective preictal length = argPreictalDuration - argPredictionHorizon
     # (e.g. 30 min - 5 min = 25 min of preictal training data per seizure)
 
-    intPreictalTimePts     = argPreictalDuration   * argSamplingFreq
-    intPredictionHorizonPts = argPredictionHorizon * argSamplingFreq
+    intPreictalTimePts     = int(argPreictalDuration   * argSamplingFreq)
+    intPredictionHorizonPts = int(argPredictionHorizon * argSamplingFreq)
 
     lstNewTimePts = [lstSegTimePts[0]]   # first time point
     lstNewLabels  = []
