@@ -69,6 +69,8 @@ if (blnBatchMode):
     objArgParse.add_argument('-ss',   '--stepsizetimepts',   required = False, default = -1,    help = '')  # Will be over-written from model
     objArgParse.add_argument('-sss',  '--stepsizestates', type = json.loads, required = False, default = '{}', help = '')  # Example use: -sss '{"ictal": 128}'
     objArgParse.add_argument('-sw',   '--subwindowfraction', required = False, default = -1,    help = '')  # Will be over-written from model
+    objArgParse.add_argument('-pd',   '--preictalduration',  required = False, default = 1800, help = '')  # Will be over-written from model
+    objArgParse.add_argument('-ph',   '--predictionhorizon', required = False, default = 300,  help = '')  # Will be over-written from model
     
     objArgParse.add_argument('-smod', '--scalingmode',       required = False, default = -1,    help = '')  # Will be over-written from model
     objArgParse.add_argument('-smin', '--scaledmin',         required = False, default = -1,    help = '')  # Will be over-written from model
@@ -95,6 +97,8 @@ if (blnBatchMode):
     argStepSizeStates    = dctArgs['stepsizestates']
     argStepSizeStates    = {}     # Step size of sliding window for specific segment states (default = {}, use -ssv value)
     argSubWindowFraction = float(dctArgs['subwindowfraction'])
+    argPreictalDuration  = int(dctArgs['preictalduration'])
+    argPredictionHorizon = int(dctArgs['predictionhorizon'])
     
     argScalingMode       = int(dctArgs['scalingmode'])
     argScaledMin         = int(dctArgs['scaledmin'])
@@ -131,6 +135,8 @@ else:
     argStepSizeTimePts   = -1
     argStepSizeStates    = {}     # Step size of sliding window for specific segment states (default = {}, use -ssv value)
     argSubWindowFraction = 0.3
+    argPreictalDuration  = 1800   # Preictal window in seconds (default: 1800 = 30 min)
+    argPredictionHorizon = 300    # Prediction horizon in seconds (default: 300 = 5 min)
     
     argScalingMode       = 1
     argScaledMin         = -1
@@ -209,6 +215,8 @@ if (dctModelProperties):
     argStepSizeTimePts   = dctModelProperties['intStepSizeTimePts']
     argStepSizeStates    = utils.fnFindInDct(dctModelProperties, 'dctStepSizeStates', argStepSizeStates)  # May not exist in some models
     argSubWindowFraction = dctModelProperties['fltSubWindowFraction']
+    argPreictalDuration  = utils.fnFindInDct(dctModelProperties, 'intPreictalDuration', argPreictalDuration)
+    argPredictionHorizon = utils.fnFindInDct(dctModelProperties, 'intPredictionHorizon', argPredictionHorizon)
 
     argScalingMode       = dctModelProperties['intScalingMode']
     argScaledMin         = dctModelProperties['fltScaledMin']
@@ -227,6 +235,8 @@ if (dctModelProperties):
     print('    argStepSizeTimePts = {}'.format(argStepSizeTimePts))
     print('    argStepSizeStates = {}'.format(argStepSizeStates))
     print('    argSubWindowFraction = {}'.format(argSubWindowFraction))
+    print('    argPreictalDuration = {}s ({} min)'.format(argPreictalDuration, argPreictalDuration // 60))
+    print('    argPredictionHorizon = {}s ({} min)'.format(argPredictionHorizon, argPredictionHorizon // 60))
     print('    argScalingParams = {}'.format(argScalingParams))
     print()
     
@@ -264,6 +274,8 @@ print('argSubSeqDuration = {}'.format(argSubSeqDuration))
 print('argStepSizeTimePts = {}'.format(argStepSizeTimePts))
 print('argStepSizeStates = {}'.format(argStepSizeStates))
 print('argSubWindowFraction = {}'.format(argSubWindowFraction))
+print('argPreictalDuration = {}s ({} min)'.format(argPreictalDuration, argPreictalDuration // 60))
+print('argPredictionHorizon = {}s ({} min)'.format(argPredictionHorizon, argPredictionHorizon // 60))
 
 print('argScalingParams = {}'.format(argScalingParams))
 
@@ -315,6 +327,8 @@ objTestDataset = chb.CHBMITDataset(
     sub_window_fraction=fltSubWindowFraction,
     anno_suffix='annotation.txt',
     force_channels=lstTrainingChannels if lstTrainingChannels else None,
+    preictal_duration=argPreictalDuration,
+    prediction_horizon=argPredictionHorizon,
     argInfo=True, argDebug=False)
 
 intLabeledTestNumChannels = objTestDataset.num_channels

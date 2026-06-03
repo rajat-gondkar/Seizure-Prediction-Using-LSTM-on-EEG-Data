@@ -128,6 +128,9 @@ if (blnBatchMode):
     objArgParse.add_argument('-sss',  '--stepsizestates', type = json.loads, required = False, default = '{}', help = '')  # Example use: -sss '{"ictal": 128}'
     objArgParse.add_argument('-sw',   '--subwindowfraction',  required = False, default = -1,   help = '')
     
+    objArgParse.add_argument('-pd',   '--preictalduration',   required = False, default = 1800, help = '')  # Preictal window in seconds (default: 1800 = 30 min)
+    objArgParse.add_argument('-ph',   '--predictionhorizon',  required = False, default = 300,  help = '')  # Prediction horizon in seconds (default: 300 = 5 min)
+    
     objArgParse.add_argument('-smod', '--scalingmode',        required = False, default = -1,   help = '')
     objArgParse.add_argument('-smin', '--scaledmin',          required = False, default = -1,   help = '')
     objArgParse.add_argument('-smax', '--scaledmax',          required = False, default = 1,    help = '')
@@ -171,6 +174,8 @@ if (blnBatchMode):
     argStepSizeTimePts   = int(dctArgs['stepsizetimepts'])
     argStepSizeStates    = dctArgs['stepsizestates']
     argSubWindowFraction = float(dctArgs['subwindowfraction'])
+    argPreictalDuration  = int(dctArgs['preictalduration'])
+    argPredictionHorizon = int(dctArgs['predictionhorizon'])
     
     argScalingMode       = int(dctArgs['scalingmode'])
     argScaledMin         = int(dctArgs['scaledmin'])
@@ -226,6 +231,8 @@ else:
     argStepSizeTimePts   = -1     # Step size of sliding window in time points (default = -1, no sliding window)
     argStepSizeStates    = {}     # Step size of sliding window for specific segment states (default = {}, use -ssv value)
     argSubWindowFraction = 0.3    # Fraction of sliding window to use to determine segment type (default = -1, entire window)
+    argPreictalDuration  = 1800   # Preictal window in seconds (default: 1800 = 30 min)
+    argPredictionHorizon = 300    # Prediction horizon in seconds (default: 300 = 5 min)
     
     argScalingMode       = 1      # Type of scaling to be applied to the preprocessed data
     argScaledMin         = -1     # Minimum value of the scaled data
@@ -276,6 +283,8 @@ print('argSubSeqDuration = {}'.format(argSubSeqDuration))
 print('argStepSizeTimePts = {}'.format(argStepSizeTimePts))
 print('argStepSizeStates = {}'.format(argStepSizeStates))
 print('argSubWindowFraction = {}'.format(argSubWindowFraction))
+print('argPreictalDuration = {}s ({} min)'.format(argPreictalDuration, argPreictalDuration // 60))
+print('argPredictionHorizon = {}s ({} min)'.format(argPredictionHorizon, argPredictionHorizon // 60))
 
 print('argScalingParams = {}'.format(argScalingParams))
 
@@ -409,6 +418,8 @@ objFullDataset = chb.CHBMITDataset(
     step_size_states=argStepSizeStates,
     sub_window_fraction=argSubWindowFraction,
     anno_suffix='annotation.txt',
+    preictal_duration=argPreictalDuration,
+    prediction_horizon=argPredictionHorizon,
     argInfo=True, argDebug=False)
 
 intTotalWindows = len(objFullDataset)
@@ -778,6 +789,8 @@ dctModelProperties = {
     'intStepSizeTimePts':   argStepSizeTimePts,
     'dctStepSizeStates':    argStepSizeStates,
     'fltSubWindowFraction': argSubWindowFraction,
+    'intPreictalDuration':  argPreictalDuration,
+    'intPredictionHorizon': argPredictionHorizon,
     
     'intScalingMode':       argScalingMode,
     'fltScaledMin':         argScaledMin,

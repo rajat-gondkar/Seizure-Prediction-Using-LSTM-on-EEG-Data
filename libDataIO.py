@@ -906,7 +906,7 @@ def fnClusterDetection(argStartEndTimePts):
 # segments based on the change in EEG state within the segment
 # (segment label and type). Uses the list of seizure start and end
 # time points from fnReadCHBMITAnno() as a starting point
-def fnBreakCHBMITSegment(argData, argStartEndTimePts, argSamplingFreq, argPreictalDuration = 5, argDebug = False):
+def fnBreakCHBMITSegment(argData, argStartEndTimePts, argSamplingFreq, argPreictalDuration = 1800, argPredictionHorizon = 300, argDebug = False):
     
     lstSegLabels        = []
     lstSegTypes         = []
@@ -1023,49 +1023,89 @@ def fnBreakCHBMITSegment(argData, argStartEndTimePts, argSamplingFreq, argPreict
     # TODO: Maybe we can add an argument to generate an annotation file
     #       for preictal states
     
-    lstSegTimePtsPre = []
-    lstSegLabelsPre  = []
-    lstSegTypesPre   = []
-    
-    for intSegIdx in range(len(lstSegTimePts) - 1):
-        strSegLabel = lstSegLabels[intSegIdx]
-        intSegType  = lstSegTypes[intSegIdx]
-        
-        intStartTimePt = lstSegTimePts[intSegIdx]
-        intEndTimePt = lstSegTimePts[intSegIdx + 1]
-        
-        if (argDebug): print('  intStartTimePt = {}, intEndTimePt = {}'.format(intStartTimePt, intEndTimePt))
-        
-        if (fnIsSegState('ictal', intSegType) and intSegIdx > 0):
-            strSegLabelPrev = lstSegLabels[intSegIdx - 1]
-            intSegTypePrev  = lstSegTypes[intSegIdx - 1]
-            
-            intStartTimePtPrev = lstSegTimePts[intSegIdx - 1]
-            intEndTimePtPrev = lstSegTimePts[intSegIdx]
-            
-            if (argDebug): print('  intStartTimePtPrev = {}, intEndTimePtPrev = {}'.format(intStartTimePtPrev, intEndTimePtPrev))
-            
-            if (fnIsSegState('interictal', intSegTypePrev)):
-                tupPreictal = dctSegStates['preictal']
-                
-                intNumPreictalTimePts = argPreictalDuration * argSamplingFreq
-                intStartTimePtPreictal = intEndTimePtPrev - intNumPreictalTimePts
-                intEndTimePtPreictal = intEndTimePtPrev
-                
-                lstSegTimePtsPre.pop()
-                lstSegTimePtsPre.extend([intStartTimePtPreictal, intEndTimePtPreictal])
-                lstSegLabelsPre.append(tupPreictal[0])
-                lstSegTypesPre.append(tupPreictal[1])
-                
-        lstSegTimePtsPre.extend([intStartTimePt, intEndTimePt])
-        lstSegLabelsPre.append(strSegLabel)
-        lstSegTypesPre.append(intSegType)
-        
+    # Carve out preictal segments using a 3-zone model:
+    #
+    #   |--- interictal (0) ---|--- preictal (1) ---|--- gap (0) ---|--- ictal (2) ---|
+    #                         ^                    ^               ^
+    #                  onset - preictal_dur   onset - pred_horiz   seizure onset
+    #
+    # - preictal: the warning zone the model learns to detect
+    # - gap:      interictal between preictal end and seizure onset (prediction horizon)
+    # - ictal:    the seizure itself
+    #
+    # argPreictalDuration  = full preictal window in seconds (default 1800 = 30 min)
+    # argPredictionHorizon = gap before seizure in seconds   (default 300  = 5 min)
+    #
+    # Effective preictal length = argPreictalDuration - argPredictionHorizon
+    # (e.g. 30 min - 5 min = 25 min of preictal training data per seizure)
+
+    intPreictalTimePts     = argPreictalDuration   * argSamplingFreq
+    intPredictionHorizonPts = argPredictionHorizon * argSamplingFreq
+
+    lstNewTimePts = [lstSegTimePts[0]]   # first time point
+    lstNewLabels  = []
+    lstNewTypes   = []
+
+    for intSegIdx in range(len(lstSegLabels)):
+        intSegStartPt  = lstSegTimePts[intSegIdx]
+        intSegEndPt    = lstSegTimePts[intSegIdx + 1]
+        strSegLabel    = lstSegLabels[intSegIdx]
+        intSegType     = lstSegTypes[intSegIdx]
+
+        blnNextIsIctal = (intSegIdx + 1 < len(lstSegLabels) and
+                          fnIsSegState('ictal', lstSegTypes[intSegIdx + 1]))
+
+        if fnIsSegState('interictal', intSegType) and blnNextIsIctal:
+            # The next (ictal) segment starts at intSegEndPt
+            intIctalStartPt   = intSegEndPt
+            intPreictalStart  = intIctalStartPt - intPreictalTimePts
+            intPreictalEnd    = intIctalStartPt - intPredictionHorizonPts
+
+            # Clamp to the boundaries of the current interictal segment
+            intPreictalStart  = max(intPreictalStart, intSegStartPt)
+            intPreictalEnd    = max(intPreictalEnd,   intSegStartPt)
+            intPreictalEnd    = min(intPreictalEnd,   intSegEndPt)
+
+            if intPreictalStart < intPreictalEnd:
+                # Remaining interictal before the preictal zone
+                if intPreictalStart > intSegStartPt:
+                    lstNewLabels.append('interictal')
+                    lstNewTypes.append(dctSegStates['interictal'][1])
+                    lstNewTimePts.append(intPreictalStart)
+
+                # Preictal zone
+                lstNewLabels.append('preictal')
+                lstNewTypes.append(dctSegStates['preictal'][1])
+                lstNewTimePts.append(intPreictalEnd)
+
+                # Interictal gap between preictal end and seizure onset
+                if intPreictalEnd < intSegEndPt:
+                    lstNewLabels.append('interictal')
+                    lstNewTypes.append(dctSegStates['interictal'][1])
+                    lstNewTimePts.append(intSegEndPt)
+            else:
+                # Preictal zone too small — keep entire segment as interictal
+                lstNewLabels.append(strSegLabel)
+                lstNewTypes.append(intSegType)
+                lstNewTimePts.append(intSegEndPt)
+        else:
+            # Keep segment as-is (ictal segments, trailing interictal, etc.)
+            lstNewLabels.append(strSegLabel)
+            lstNewTypes.append(intSegType)
+            lstNewTimePts.append(intSegEndPt)
+
+    # Replace original lists with 3-zone enriched versions
+    lstSegTimePts = lstNewTimePts
+    lstSegLabels  = lstNewLabels
+    lstSegTypes   = lstNewTypes
+
     if (argDebug):
-        print('  lstSegTimePtsPre = {}'.format(lstSegTimePtsPre))
-        print('  lstSegLabelsPre = {}'.format(lstSegLabelsPre))
-        print('  lstSegTypesPre = {}'.format(lstSegTypesPre))        
-        
+        print('  After 3-zone carving (preictal={}s, horizon={}s):'.format(
+            argPreictalDuration, argPredictionHorizon))
+        print('  lstSegTimePts = {}'.format(lstSegTimePts))
+        print('  lstSegLabels  = {}'.format(lstSegLabels))
+        print('  lstSegTypes   = {}'.format(lstSegTypes))
+
     print()
     
     # Loop through lstSegTimePts[] in tandem with lstSegLabels[] and

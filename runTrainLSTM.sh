@@ -13,6 +13,7 @@ python scrTrainLSTM.py \
   -csv './DataCSVs/CHB-MIT/chb01.csv' \
   -tcsv './DataCSVs/CHB-MIT/chb01_Test.csv' \
   -rf 128 -du 5 -bs 16 -smod 1 -smin -1 -smax 1 \
+  -pd 1800 -ph 300 \
   -vf 0.2 -tf 0.1 -gpu 0 -nw 4 \
   -hd 256 -nl 2 -os 3 -dr 0.5 \
   -opt 0 -lr 0.001 -ep 10 -ve 20

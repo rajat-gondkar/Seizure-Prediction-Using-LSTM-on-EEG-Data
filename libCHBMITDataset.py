@@ -37,6 +37,7 @@ import libUtils as utils
 def _build_window_index_for_file(fpath, fidx, orig_sf, target_sf, subseq_dur_s,
                                  step_size_pts, sub_win_frac, step_size_states,
                                  anno_suffix, scaling_minmax=None,
+                                 preictal_duration=1800, prediction_horizon=300,
                                  argInfo=False, argDebug=False):
     """
     Scans a single EDF file, reads annotations, breaks it into segments,
@@ -67,7 +68,9 @@ def _build_window_index_for_file(fpath, fidx, orig_sf, target_sf, subseq_dur_s,
     seg_labels, seg_types, seg_start_end_pts, seg_start_end_secs, \
         seg_durations, seg_num_timepts, data_segs = \
         dio.fnBreakCHBMITSegment(data_edf, start_end_timepts, sfreq,
-                                 argPreictalDuration=5, argDebug=argDebug)
+                                 argPreictalDuration=preictal_duration,
+                                 argPredictionHorizon=prediction_horizon,
+                                 argDebug=argDebug)
 
     # Build per-sample-point label array
     seg_type_timepts = np.zeros(n_pts, dtype=int)
@@ -178,7 +181,8 @@ class CHBMITDataset(Dataset):
                  scaling_params=(), scaling_info=(), step_size_time_pts=-1,
                  step_size_states=None, sub_window_fraction=-1,
                  anno_suffix='annotation.txt', dtype=np.float32,
-                 force_channels=None,
+                 force_channels=None, preictal_duration=1800,
+                 prediction_horizon=300,
                  argInfo=False, argDebug=False):
         super().__init__()
 
@@ -278,6 +282,8 @@ class CHBMITDataset(Dataset):
                     self.file_scaling[i] = (data_min[:, i], data_max[:, i])
 
         # ---- Build lightweight window index ----
+        self.preictal_duration  = preictal_duration
+        self.prediction_horizon = prediction_horizon
         self.index = []
         for fidx, fpath in enumerate(self.files):
             entries, _, _, _ = _build_window_index_for_file(
@@ -285,6 +291,8 @@ class CHBMITDataset(Dataset):
                 self.subseq_duration, self.step_size, self.sub_window_fraction,
                 self.step_size_states, self.anno_suffix,
                 scaling_minmax=self.file_scaling[fidx],
+                preictal_duration=preictal_duration,
+                prediction_horizon=prediction_horizon,
                 argInfo=argInfo, argDebug=argDebug)
             self.index.extend(entries)
 
