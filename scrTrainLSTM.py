@@ -420,6 +420,8 @@ objFullDataset = chb.CHBMITDataset(
     anno_suffix='annotation.txt',
     preictal_duration=argPreictalDuration,
     prediction_horizon=argPredictionHorizon,
+    bandpass_freqs=(0.5, 45.0),
+    zscore_normalize=True,
     argInfo=True, argDebug=False)
 
 intTotalWindows = len(objFullDataset)
@@ -437,24 +439,69 @@ intTrainSeqLen      = objFullDataset.subseq_timepts_resampled
 tupScalingInfo      = ()  # computed internally by Dataset
 
 # ---------------------------------------------------------------------------
-# Train / validation / test split
+# Train / validation / test split — FILE-BASED to prevent temporal leakage
 # ---------------------------------------------------------------------------
+# Random splitting causes windows from the same seizure episode to leak across
+# train/val/test. Instead, we assign entire files to each split so that
+# temporally adjacent windows stay together.
 fltValSetFrac = argValSetFrac
 fltTestSetFrac = argTestSetFrac
 fltTrainSetFrac = 1 - fltValSetFrac - fltTestSetFrac
 
-lstAllIndices = np.arange(intTotalWindows)
-if argShuffleIndices:
-    np.random.seed(1)
-    np.random.shuffle(lstAllIndices)
+# Group dataset indices by source file
+file_to_indices = {}
+for i in range(intTotalWindows):
+    fidx = objFullDataset.index[i]['file_idx']
+    if fidx not in file_to_indices:
+        file_to_indices[fidx] = []
+    file_to_indices[fidx].append(i)
 
-intTrainEnd = round(intTotalWindows * fltTrainSetFrac)
-intValEnd   = intTrainEnd + round(intTotalWindows * fltValSetFrac)
+lstFileIndices = sorted(file_to_indices.keys())
+intNumFiles = len(lstFileIndices)
+print('Found {} unique source files across {} windows'.format(intNumFiles, intTotalWindows))
 
-lstTrainIndices = lstAllIndices[:intTrainEnd].tolist()
-lstValIndices   = lstAllIndices[intTrainEnd:intValEnd].tolist()
-lstTestIndices  = lstAllIndices[intValEnd:].tolist()
+# Shuffle file order for random assignment (reproducible)
+np.random.seed(1)
+lstShuffledFiles = lstFileIndices.copy()
+np.random.shuffle(lstShuffledFiles)
 
+# Assign files to splits proportionally
+intTrainFiles = max(1, round(intNumFiles * fltTrainSetFrac))
+intValFiles   = max(1, round(intNumFiles * fltValSetFrac))
+intTestFiles  = max(1, intNumFiles - intTrainFiles - intValFiles)
+
+# Adjust if total exceeds available
+while intTrainFiles + intValFiles + intTestFiles > intNumFiles:
+    if intTestFiles > 1:
+        intTestFiles -= 1
+    elif intValFiles > 1:
+        intValFiles -= 1
+    else:
+        intTrainFiles -= 1
+
+train_files = lstShuffledFiles[:intTrainFiles]
+val_files   = lstShuffledFiles[intTrainFiles:intTrainFiles + intValFiles]
+test_files  = lstShuffledFiles[intTrainFiles + intValFiles:]
+
+lstTrainIndices = []
+for fidx in train_files:
+    lstTrainIndices.extend(file_to_indices[fidx])
+
+lstValIndices = []
+for fidx in val_files:
+    lstValIndices.extend(file_to_indices[fidx])
+
+lstTestIndices = []
+for fidx in test_files:
+    lstTestIndices.extend(file_to_indices[fidx])
+
+np.random.seed(1)
+np.random.shuffle(lstTrainIndices)
+np.random.shuffle(lstValIndices)
+np.random.shuffle(lstTestIndices)
+
+print('File-based split: {} train files, {} val files, {} test files'.format(
+    len(train_files), len(val_files), len(test_files)))
 print('Training set:   {} samples'.format(len(lstTrainIndices)))
 print('Validation set: {} samples'.format(len(lstValIndices)))
 print('Test set:       {} samples'.format(len(lstTestIndices)))
@@ -594,12 +641,14 @@ import torch.nn as nn
 
 fltLearningRate = argLearningRate
 
-# If argClassWeights[] is empty, assign equal weight to each class
-if (argClassWeights is None or len(argClassWeights) == 0):
-    argClassWeights = [1] * argOutputSize  # Assign equal weight to each class
+# Class balancing: WeightedRandomSampler already oversamples minority classes
+# to create balanced batches. Using loss weights on TOP of the sampler causes
+# double-compensation and hurts learning (model predicts "preictal" for everything).
+# Therefore we use equal loss weights (no extra weighting) and let the sampler handle balancing.
+argClassWeights = [1] * argOutputSize  # Equal weights — sampler handles imbalance
 
 argClassWeights = np.array(argClassWeights, dtype = np.float32)
-print('argClassWeights = {}'.format(argClassWeights))
+print('argClassWeights = {} (sampler handles class balancing)'.format(argClassWeights))
 
 arrClassWeights = torch.tensor(argClassWeights)
 if (blnTrainOnGPU):
@@ -663,6 +712,10 @@ for intEpoch in range(intNumEpochs):
         train_iter = tqdm(objTrainLoader, desc="Train", unit="batch",
                           total=len(objTrainLoader), ncols=80, leave=False)
 
+    # Track epoch-level training loss (not just last batch)
+    fltEpochTrainLossSum = 0.0
+    intEpochTrainBatches = 0
+
     # Batch loop (each loop trains one batch of input data)
     for arrInputData, arrLabels in train_iter:
         intBatchLoopIdx += 1  # New batch/training loop
@@ -691,6 +744,10 @@ for intEpoch in range(intNumEpochs):
         # Calculate the loss and perform backprop
         fltTrainingLoss = objCriterion(arrOutput, arrLabels)
         fltTrainingLoss.backward()
+
+        # Accumulate epoch-level training loss
+        fltEpochTrainLossSum += fltTrainingLoss.item()
+        intEpochTrainBatches += 1
 
         # Using clip_grad_norm() helps prevent the exploding gradient problem in RNNs / LSTMs
         nn.utils.clip_grad_norm_(objModelLSTM.parameters(), fltGradClip)
@@ -732,7 +789,7 @@ for intEpoch in range(intNumEpochs):
             # Clear the GPU cache regularly
             torch.cuda.empty_cache()
 
-            mean_train_loss = fltTrainingLoss.item()
+            mean_train_loss = fltEpochTrainLossSum / max(intEpochTrainBatches, 1)
             mean_val_loss = np.mean(lstValidationBatchLosses) if lstValidationBatchLosses else 0.0
             print('  Epoch: {}/{}  Step: {}  TrainLoss: {:.4f}  ValLoss: {:.4f}'
                   .format(intEpoch + 1, intNumEpochs, intBatchLoopIdx, mean_train_loss, mean_val_loss))

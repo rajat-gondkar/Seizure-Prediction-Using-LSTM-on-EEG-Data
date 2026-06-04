@@ -329,6 +329,8 @@ objTestDataset = chb.CHBMITDataset(
     force_channels=lstTrainingChannels if lstTrainingChannels else None,
     preictal_duration=argPreictalDuration,
     prediction_horizon=argPredictionHorizon,
+    bandpass_freqs=(0.5, 45.0),
+    zscore_normalize=True,
     argInfo=True, argDebug=False)
 
 intLabeledTestNumChannels = objTestDataset.num_channels

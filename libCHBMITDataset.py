@@ -182,7 +182,8 @@ class CHBMITDataset(Dataset):
                  step_size_states=None, sub_window_fraction=-1,
                  anno_suffix='annotation.txt', dtype=np.float32,
                  force_channels=None, preictal_duration=1800,
-                 prediction_horizon=300,
+                 prediction_horizon=300, bandpass_freqs=(0.5, 45.0),
+                 zscore_normalize=True,
                  argInfo=False, argDebug=False):
         super().__init__()
 
@@ -227,6 +228,20 @@ class CHBMITDataset(Dataset):
             self.num_channels = n_ch
             self.channels = channels
         self.orig_sampling_freq = sfreq
+
+        # ---- Pre-compute bandpass filter coefficients ----
+        self.butter_sos = None
+        if bandpass_freqs is not None and len(bandpass_freqs) == 2:
+            low, high = bandpass_freqs
+            nyq = sfreq / 2.0
+            if low > 0 and high < nyq:
+                try:
+                    self.butter_sos = sp_signal.butter(
+                        4, [low / nyq, high / nyq], btype='band', output='sos')
+                    if argInfo:
+                        print(f"[CHBMITDataset] Bandpass filter: {low}-{high} Hz (Butterworth order 4)")
+                except Exception as e:
+                    print(f"[CHBMITDataset] WARNING: could not create bandpass filter: {e}")
 
         # ---- Resampling frequency ----
         if resampling_freq <= 0 or resampling_freq > sfreq:
@@ -284,6 +299,8 @@ class CHBMITDataset(Dataset):
         # ---- Build lightweight window index ----
         self.preictal_duration  = preictal_duration
         self.prediction_horizon = prediction_horizon
+        self.bandpass_freqs = bandpass_freqs
+        self.zscore_normalize = zscore_normalize
         self.index = []
         for fidx, fpath in enumerate(self.files):
             entries, _, _, _ = _build_window_index_for_file(
@@ -351,12 +368,26 @@ class CHBMITDataset(Dataset):
             raise
 
         # ---- Apply scaling if we haven't already at indexing time ----
-        # (Scaling was done during index build, but if we want on-the-fly
+        # (Scaling was done during index, but if we want on-the-fly
         # scaling we could do it here.  For now we scaled during index.)
+
+        # ---- Apply bandpass filter ----
+        if self.butter_sos is not None:
+            try:
+                window = sp_signal.sosfilt(self.butter_sos, window, axis=1)
+            except Exception:
+                pass  # Skip filtering on error (e.g., corrupt data)
 
         # ---- Resample if needed ----
         if self.resampling_freq != self.orig_sampling_freq:
             window = sp_signal.resample(window, entry['subseq_pts_target'], axis=1)
+
+        # ---- Z-score normalize per channel ----
+        if self.zscore_normalize:
+            for ch in range(window.shape[0]):
+                ch_std = window[ch].std()
+                if ch_std > 1e-8:
+                    window[ch] = (window[ch] - window[ch].mean()) / ch_std
 
         # ---- Transpose to (time, channels) for batch_first LSTM ----
         window = window.T  # (timepts, channels)

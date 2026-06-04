@@ -17,24 +17,31 @@ Create an LSTM model that will be used to analyze multichannel EEG signal
 '''
 
 class clsLSTM(nn.Module):
-    # Initialize the model by setting up the layers
     def __init__(self, argFeaturesDim, argHiddenDim, argNumLayers, argOutputSize, argDropProb = 0.5, argDebug = False):
         super(clsLSTM, self).__init__()
         
-        # Make these parameters accessible in the other methods
         self.intFeaturesDim = argFeaturesDim
         self.intHiddenDim   = argHiddenDim
         self.intNumLayers   = argNumLayers
         self.intOutputSize  = argOutputSize
         self.fltDropProb    = argDropProb
+        self.blnBidirectional = True
+        self.intLSTMOutputDim = argHiddenDim * 2 if self.blnBidirectional else argHiddenDim
         
-        # Define the structure of each layer in the model
-        self.LSTMLayer = nn.LSTM(argFeaturesDim, argHiddenDim, argNumLayers,  # LSTM layer
-                                 dropout = argDropProb, batch_first = True)
+        # Bidirectional LSTM for better temporal context
+        self.LSTMLayer = nn.LSTM(argFeaturesDim, argHiddenDim, argNumLayers,
+                                 dropout=argDropProb, batch_first=True,
+                                 bidirectional=self.blnBidirectional)
         
-        self.DropoutLayer = nn.Dropout(p = argDropProb)                       # Dropout layer
+        # Attention mechanism: learns which time steps matter most
+        self.AttentionLayer = nn.Sequential(
+            nn.Linear(self.intLSTMOutputDim, argHiddenDim),
+            nn.Tanh(),
+            nn.Linear(argHiddenDim, 1)
+        )
         
-        self.FCLayer = nn.Linear(argHiddenDim, argOutputSize)                 # Fully-connected layer
+        self.DropoutLayer = nn.Dropout(p=argDropProb)
+        self.FCLayer = nn.Linear(self.intLSTMOutputDim, argOutputSize)
         
         
     # Display all the named parameters and their shapes in the model
@@ -49,82 +56,48 @@ class clsLSTM(nn.Module):
     # Perform a forward pass on the model provided with input data and a previous
     # hidden state
     def forward(self, argDataIn, argHiddenIn, argDebug = False):        
-        # NOTE: intBatchSize should be based on the first dimension of the input
-        #       data, not by the intBatchSize defined when formatting data (this
-        #       way we can feed in data with any batch size for testing). Otherwise,
-        #       things may work during training, but will break during testing,
-        #       when we feed in test data with different batch sizes (which is
-        #       perfectly legal)
         intBatchSize = argDataIn.shape[0]
         
-        # arrDataIn (batch size x sequence length, features dim) -> input data
-        # arrHiddenIn/Out (num layers, batch size, hidden dim) -> hidden state
-        # arrLSTMOut (batch size, sequence length, hidden dim) -> LSTM output
-        # arrFCOut (batch size * sequence length, output size) -> FC layer output
-        # arrOutput (batch_size, output_size) -> final output
-        
-        # Feed input data and the previous hidden state through the LSTM
-        # (just like passing input date through a CNN)
-        #arrLSTMOut, arrHiddenOut = self.LSTMLayer(argDataIn, argHiddenIn)
+        # Feed input through bidirectional LSTM
         arrLSTMOut, arrHiddenOut = self.LSTMLayer(argDataIn.float(), argHiddenIn)
         if (argDebug): print('arrLSTMOut.shape = {}'.format(arrLSTMOut.shape))
         
-        # Pass through a dropout layer
-        arrDropoutOut = self.DropoutLayer(arrLSTMOut)
+        # Attention: compute weights over time steps
+        attn_scores = self.AttentionLayer(arrLSTMOut)          # (batch, time, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)      # (batch, time, 1)
+        arrContext = torch.sum(arrLSTMOut * attn_weights, dim=1)  # (batch, lstm_output_dim)
+        if (argDebug): print('arrContext.shape = {}'.format(arrContext.shape))
+        
+        # Dropout on the context vector (not on every time step)
+        arrDropoutOut = self.DropoutLayer(arrContext)
         if (argDebug): print('arrDropoutOut.shape = {}'.format(arrDropoutOut.shape))
         
-        # Reshape output to be [batch size * sequence length, hidden dim]
-        #arrDropoutFlat = arrDropoutOut.view(-1, self.intHiddenDim)
-        arrDropoutFlat = arrDropoutOut.contiguous().view(-1, self.intHiddenDim)
-        if (argDebug): print('arrDropoutFlat.shape = {}'.format(arrDropoutFlat.shape))
-        
-        # Put the flattened LSTM output through a fully-connected layer to get final
-        # output so arrFCOut[] will be [batch size * sequence length, output size]
-        arrFCOut = self.FCLayer(arrDropoutFlat)
-        if (argDebug): print('arrFCOut.shape = {}'.format(arrFCOut.shape))
-        
-        # Reshape the FC layer output to be [batch size, sequence length, output size]
-        arrFCOutReshaped = arrFCOut.view(intBatchSize, -1, self.intOutputSize)
-        if (argDebug): print('arrFCOutReshaped.shape = {}'.format(arrFCOutReshaped.shape))
-                
-        # Get the last output for each sequence, with shape becoming [batch size, output size]
-        arrOutput = arrFCOutReshaped[:, -1, :]
+        # FC layer for classification
+        arrOutput = self.FCLayer(arrDropoutOut)
         if (argDebug): print('arrOutput.shape = {}'.format(arrOutput.shape))
                 
-        # Return the last output of each sequence and a hidden state
         return arrOutput, arrHiddenOut
     
     
     # Initialize the hidden and cell states with zeros
     def initHidden(self, argBatchSize, argTrainOnGPU = False, argDebug = False):
-        # Create two new tensors with sizes num layers x batch size x hidden dim,
-        # initialized to zero, for both hidden state and cell state of the LSTM
+        # For bidirectional LSTM, num_directions=2; hidden state shape:
+        # (num_layers * num_directions, batch_size, hidden_dim)
+        intNumDirections = 2 if self.blnBidirectional else 1
+        intHiddenLayers = self.intNumLayers * intNumDirections
         
-        # Hidden state carries the short-term memory and cell state carries the
-        # long-term memory:
-        #   https://colah.github.io/posts/2015-08-Understanding-LSTMs/
-        arrWeight = next(self.parameters()).data  # NOTE: Apparently self.parameters() is an iterator. But why
-                                                  #       only get the next item? This is just so that we can
-                                                  #       use new() to create the hidden & cell states with the
-                                                  #       same dtype (but different shape)
-        if (argDebug):
-            print('arrWeight.shape = {} ({})'.format(arrWeight.shape, arrWeight.type()))
-            
-        # Hidden is a tuple of two tensors (hidden state, cell state) of the same shape (n_layers x
-        # batch_size x hidden_dim) create using new() with the same dtype as weight, initialized to
-        # zero_() in-place. The tuple requirement is documented in the PyTorch LSTM documentation
-        # as (h_0, c_0)
-        #   - https://pytorch.org/docs/stable/nn.html#lstm
-        #   - https://pytorch.org/docs/0.3.1/tensors.html?highlight=new#torch.Tensor.new
+        arrWeight = next(self.parameters()).data
+        
         if (argTrainOnGPU):
-            arrHiddenState = (arrWeight.new(self.intNumLayers, argBatchSize, self.intHiddenDim).zero_().cuda(),
-                              arrWeight.new(self.intNumLayers, argBatchSize, self.intHiddenDim).zero_().cuda())
+            arrHiddenState = (arrWeight.new(intHiddenLayers, argBatchSize, self.intHiddenDim).zero_().cuda(),
+                              arrWeight.new(intHiddenLayers, argBatchSize, self.intHiddenDim).zero_().cuda())
         else:
-            arrHiddenState = (arrWeight.new(self.intNumLayers, argBatchSize, self.intHiddenDim).zero_(),
-                              arrWeight.new(self.intNumLayers, argBatchSize, self.intHiddenDim).zero_())
+            arrHiddenState = (arrWeight.new(intHiddenLayers, argBatchSize, self.intHiddenDim).zero_(),
+                              arrWeight.new(intHiddenLayers, argBatchSize, self.intHiddenDim).zero_())
         
         if (argDebug):
-            print('intNumLayers = {}, argBatchSize = {}, intHiddenDim = {}'.format(self.intNumLayers, argBatchSize, self.intHiddenDim))
+            print('intNumLayers = {}, intNumDirections = {}, argBatchSize = {}, intHiddenDim = {}'.format(
+                self.intNumLayers, intNumDirections, argBatchSize, self.intHiddenDim))
             print('arrHiddenState.shape = ({}, {})'.format(arrHiddenState[0].shape, arrHiddenState[1].shape))
             
         return arrHiddenState
