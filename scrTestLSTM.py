@@ -20,6 +20,8 @@ import libModelLSTM as LSTM
 import libUtils as utils
 import libCHBMITDataset as chb
 
+from sklearn.metrics import confusion_matrix
+
 from operator import itemgetter
 
 
@@ -503,46 +505,38 @@ print("Test Accuracy = {}/{} = {:.4f}".format(int(round(intNumCorrect)), intTest
 # In[ ]
 
 
-# Post-testing error analysis
+# Post-testing error analysis (3-class)
 print('arrTestResults_Sorted.shape = {}'.format(arrTestResults_Sorted.shape))
 print()
 
-# Generate masks for various metrics
-arrFalsePositivesMask = np.logical_and(
-    arrTestResults_Sorted[:, 1] == dio.dctSegStates['interictal'][1],
-    arrTestResults_Sorted[:, 2] == dio.dctSegStates['ictal'][1])
-arrFalseNegativesMask = np.logical_and(
-    arrTestResults_Sorted[:, 1] == dio.dctSegStates['ictal'][1],
-    arrTestResults_Sorted[:, 2] == dio.dctSegStates['interictal'][1])
-arrTruePositivesMask  = np.logical_and(
-    arrTestResults_Sorted[:, 1] == dio.dctSegStates['ictal'][1],
-    arrTestResults_Sorted[:, 2] == dio.dctSegStates['ictal'][1])
-arrTrueNegativesMask  = np.logical_and(
-    arrTestResults_Sorted[:, 1] == dio.dctSegStates['interictal'][1],
-    arrTestResults_Sorted[:, 2] == dio.dctSegStates['interictal'][1])
-
+y_true = arrTestResults_Sorted[:, 1]
+y_pred = arrTestResults_Sorted[:, 2]
 intTestSetSize = arrTestResults_Sorted.shape[0]
 
-intNumFalsePositives = arrTestResults_Sorted[arrFalsePositivesMask].shape[0]
-intNumFalseNegatives = arrTestResults_Sorted[arrFalseNegativesMask].shape[0]
-intNumTruePositives  = arrTestResults_Sorted[arrTruePositivesMask].shape[0]
-intNumTrueNegatives  = arrTestResults_Sorted[arrTrueNegativesMask].shape[0]
-
-intNumCorrect = intTestSetSize - intNumFalsePositives - intNumFalseNegatives
-
-print('intTestSetSize = {}, intNumFalsePositives = {}, intNumFalseNegatives = {}, intNumTruePositives = {}, intNumTrueNegatives = {}'
-      .format(intTestSetSize, intNumFalsePositives, intNumFalseNegatives, intNumTruePositives, intNumTrueNegatives))
-
-fltTruePositiveRate, fltTrueNegativeRate = utils.fnCalcPerfMetrics(
-    intNumFalsePositives, intNumFalseNegatives, intNumTruePositives, intNumTrueNegatives)
-
-fltTestAccuracy = intNumCorrect / intTestSetSize
-print('Test Accuracy = {}/{} = {:.4f}'.format(int(round(intNumCorrect)), intTestSetSize, fltTestAccuracy))
-print('fltTruePositiveRate = {:.4f}, fltTrueNegativeRate = {:.4f}'.format(fltTruePositiveRate, fltTrueNegativeRate))
+# Per-class breakdown
+from sklearn.metrics import confusion_matrix
+cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
+print('Confusion matrix (rows=true, cols=pred):')
+print('               interictal  preictal  ictal')
+print('interictal     {:9d}  {:8d}  {:5d}'.format(cm[0,0], cm[0,1], cm[0,2]))
+print('preictal       {:9d}  {:8d}  {:5d}'.format(cm[1,0], cm[1,1], cm[1,2]))
+print('ictal          {:9d}  {:8d}  {:5d}'.format(cm[2,0], cm[2,1], cm[2,2]))
 print()
 
-print('False positives (interictal predicted as ictal): {} samples'.format(intNumFalsePositives))
-print('False negatives (ictal predicted as interictal): {} samples'.format(intNumFalseNegatives))
+# Overall accuracy
+intNumCorrectOverall = int(np.trace(cm))
+fltTestAccuracy = intNumCorrectOverall / intTestSetSize
+print('Overall accuracy = {}/{} = {:.4f}'.format(intNumCorrectOverall, intTestSetSize, fltTestAccuracy))
+
+# Per-class precision, recall, F1
+for i, name in enumerate(['interictal', 'preictal', 'ictal']):
+    tp = cm[i, i]
+    fn = cm[i, :].sum() - tp
+    fp = cm[:, i].sum() - tp
+    precision = tp / max(tp + fp, 1)
+    recall    = tp / max(tp + fn, 1)
+    f1        = 2 * precision * recall / max(precision + recall, 1e-8)
+    print(f'  {name:12s}: precision={precision:.4f}, recall={recall:.4f}, F1={f1:.4f}')
 print()
 
 if argSaveAnno:

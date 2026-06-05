@@ -242,8 +242,10 @@ def fnSendMail(argSMTPServer, argSMTPPort, argLogin, argPasswd, argFromEmail, ar
 
 # Calculate performance metrics
 def fnCalcPerfMetrics(argNumFalsePositives, argNumFalseNegatives, argNumTruePositives, argNumTrueNegatives):
-    fltTruePositiveRate = argNumTruePositives / (argNumTruePositives + argNumFalseNegatives)
-    fltTrueNegativeRate = argNumTrueNegatives / (argNumTrueNegatives + argNumFalsePositives)
+    denom_tp = argNumTruePositives + argNumFalseNegatives
+    denom_tn = argNumTrueNegatives + argNumFalsePositives
+    fltTruePositiveRate = argNumTruePositives / denom_tp if denom_tp > 0 else 0.0
+    fltTrueNegativeRate = argNumTrueNegatives / denom_tn if denom_tn > 0 else 0.0
     
     return fltTruePositiveRate, fltTrueNegativeRate
 
