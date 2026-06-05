@@ -394,7 +394,7 @@ class CHBMITDataset(Dataset):
                     window[ch] = (window[ch] - window[ch].mean()) / ch_std
 
         # ---- Transpose to (time, channels) for batch_first LSTM ----
-        window = window.T  # (timepts, channels)
+        window = window.T.copy()  # .copy() ensures contiguous memory
 
         return torch.from_numpy(window), torch.tensor(entry['label'], dtype=torch.long)
 

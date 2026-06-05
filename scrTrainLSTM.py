@@ -544,13 +544,13 @@ intBatchSize = argBatchSize
 
 objTrainLoader = DataLoader(objTrainDataset, batch_size=intBatchSize,
                             sampler=objTrainSampler, num_workers=argNumWorkers,
-                            pin_memory=blnTrainOnGPU)
+                            pin_memory=False)
 objValLoader   = DataLoader(objValDataset, batch_size=intBatchSize,
                             shuffle=False, num_workers=argNumWorkers,
-                            pin_memory=blnTrainOnGPU)
+                            pin_memory=False)
 objTestLoader  = DataLoader(objTestDataset, batch_size=intBatchSize,
                             shuffle=False, num_workers=argNumWorkers,
-                            pin_memory=blnTrainOnGPU)
+                            pin_memory=False)
 
 print('DataLoaders created:')
 print('  Train: {} batches/epoch (batch_size={})'.format(len(objTrainLoader), intBatchSize))
