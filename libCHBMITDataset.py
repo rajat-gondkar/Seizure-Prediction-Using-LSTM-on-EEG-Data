@@ -290,11 +290,15 @@ class CHBMITDataset(Dataset):
                         self.file_scaling[i] = (data_min_all[:, idx], data_max_all[:, idx])
                     except ValueError:
                         pass
-            else:
+            elif lstCommonChannels is None:
+                # All files have same channels — safe to compute global stats
                 arr_min, arr_max, _ = dio.fnGetCHBMITStats(self.files, argDebug=False)
                 data_min, data_max = dio.fnGenMinMaxArrays(scaling_mode, arr_min, arr_max, argDebug=False)
                 for i in range(len(self.files)):
                     self.file_scaling[i] = (data_min[:, i], data_max[:, i])
+            else:
+                # Channels differ — skip MinMax stats (Z-score normalization handles it)
+                print("[CHBMITDataset] Skipping MinMax scaling (channels differ across files; Z-score normalization active)")
 
         # ---- Build lightweight window index ----
         self.preictal_duration  = preictal_duration
